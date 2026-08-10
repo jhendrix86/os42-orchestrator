@@ -123,3 +123,15 @@ Git History (this phase):
 
 1. **Real credentials** (WordPress/dev.to/SendGrid/Unkey workspace) are a prerequisite for any of this to do real work against the real fleet instead of `mock_engines.py` — user-side, not dev-time, per `HANDOFF.md`.
 2. If real parallel steps, retries, or cron scheduling are ever needed, add them narrowly to `WorkflowExecutor`/`AutonomousScheduler` (baselayer's backoff-calculation pattern is worth borrowing) rather than adopting baselayer's engine wholesale.
+
+### Update (2026-08-10, same day): the other two workflow templates checked, confirmed not reconcilable
+
+Went back to see whether `create_daily_optimization_workflow`/`create_audience_growth_workflow` could get the same real-endpoint remapping `create_content_pillar_workflow` did. Read `analytics-engine`'s 5 routers and `marketing-automation-engine`'s `segments.py`/`leads.py` directly. Conclusion: no, not meaningfully.
+
+- `analytics-engine`'s `GET /metrics/real-time`/`/historical` are real, callable paths, but their own implementation is a hardcoded mock server-side (literally commented "For now, return a mock response" in the source) — its other 4 routers (dashboards/kpi/predictions/reports) are generic CRUD with nothing resembling "identify winners" or "update strategy."
+- `marketing-automation-engine`'s `segments.py` only has create/get/list — no engagement-based audience segmenting action; no `create_nurture` or `track_campaign` endpoint exists anywhere in the fleet.
+- Only 1 of `audience_growth`'s 4 steps (`campaigns/{id}/launch`) has any real target, and that target's own server-side implementation is itself a stub.
+
+Rebuilding either template around one real-but-mocked or real-but-stub endpoint, dropping the rest, would misrepresent them more than leaving them flagged — so both stay exactly as-is, with their docstrings updated to record this confirmation rather than just an open question. This closes out the "extend reconciliation to remaining engines" item — not because more engines got remapped, but because the ones that could be checked, were, and the honest answer for the two DSL templates that reference them is "not yet possible," not "not yet tried."
+
+`monitoring-engine`, `notification-engine`, `integration-engine`, `customer-support-engine`, and `governance-engine` were not checked further — none of them are referenced by any action currently defined anywhere in this repo's DSL or `ACTION_ENGINE_MAP`, so there was no existing wrong assumption about them to correct. They remain registered in `ENGINE_URLS` for whenever a workflow author actually needs them.

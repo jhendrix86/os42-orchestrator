@@ -168,14 +168,24 @@ def create_daily_optimization_workflow() -> Workflow:
     create_content_pillar_workflow, this template was never remapped to
     real endpoints. This function is also never called anywhere in this
     repo (confirmed by search) - it's aspirational, not exercised by any
-    test. A fleet-wide check found none of get_metrics/analyze_ab_tests/
-    identify_winners/update_strategy exist as real routes anywhere: real
-    A/B-test winner reporting exists, but folded into
-    GET /email/{id}/ab-results on marketing-automation-engine, not as
-    separate analyze/identify actions; real analytics-engine has
-    /metrics/real-time and /metrics/historical, not a generic get_metrics.
-    Left as-is (flagged, not silently dropped or half-fixed) pending a
-    real remapping pass.
+    test.
+
+    Follow-up check (same day, continued reconciliation): confirmed there
+    genuinely isn't a meaningful real remapping available, not just an
+    unverified one. analytics-engine's real routers were read directly:
+    GET /metrics/real-time and GET /metrics/historical exist and are
+    real, callable paths, but their own server-side implementation is a
+    hardcoded mock ("In production, this would query from database... For
+    now, return a mock response" - literally in the source). None of
+    analytics-engine's other routers (dashboards, kpi, predictions,
+    reports - all generic list/create/get-by-id CRUD) offer anything
+    resembling "identify winners" or "update strategy" either. Real A/B
+    winner reporting exists, but only folded into
+    GET /email/{id}/ab-results on marketing-automation-engine (requires an
+    existing email campaign ID - not a generic "analyze these tests"
+    action). Rebuilding this workflow around the one real-but-mocked
+    metrics endpoint, dropping the other 4/5 of its steps, would
+    misrepresent it more than leaving it flagged - left as-is.
     """
     workflow = Workflow(
         workflow_id=f"daily-optimize-{int(datetime.utcnow().timestamp())}",
@@ -252,8 +262,15 @@ def create_audience_growth_workflow() -> Workflow:
     properly) but launch_campaign's own server-side implementation is
     itself still a stub ("In production, this would update status..." -
     see marketing-automation-engine/app/routers/campaigns.py). No
-    track_campaign endpoint exists. Left as-is pending a real remapping
-    pass.
+    track_campaign endpoint exists.
+
+    Follow-up check (same day, continued reconciliation): re-verified
+    segments.py/leads.py directly, confirming the above - segments.py has
+    only create/get-by-id/list (no engagement-based segmenting action),
+    leads.py adds GET /{lead_id}/score but nothing resembling nurture
+    sequences. Only 1 of 4 steps (launch_campaign) has any real target at
+    all, and that target is itself a stub - rebuilding around it would
+    misrepresent this workflow more than leaving it flagged. Left as-is.
     """
     workflow = Workflow(
         workflow_id=f"growth-{int(datetime.utcnow().timestamp())}",
