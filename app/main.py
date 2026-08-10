@@ -8,15 +8,17 @@ Runs real business workflows: content creation → distribution → monetization
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
+import os
 import structlog
 from datetime import datetime
 from typing import Dict, Any, Optional
 from app.config import ENGINE_URLS
 from app.models.tenant import Tenant
 from app.routes.dashboard import router as dashboard_router
-from app.routes.optimization import router as optimization_router
+from app.routes.optimization import router as optimization_router, optimization_engine
 from app.routes.tenants import router as tenants_router
-from app.services.tenancy import get_current_tenant
+from app.services.scheduler import AutonomousScheduler
+from app.services.tenancy import get_current_tenant, require_admin
 
 logger = structlog.get_logger()
 
@@ -34,8 +36,21 @@ async def lifespan(app: FastAPI):
     app.state.active_workflows = {}
     app.state.workflow_results = {}
 
+    # Autonomous scheduler: periodically re-optimizes and applies decisions
+    # for every tenant's active workflows, so nothing has to call
+    # POST /optimization/optimize/{id}/apply by hand. Ticks immediately on
+    # startup, then every interval_seconds.
+    app.state.scheduler = AutonomousScheduler(
+        optimization_engine=optimization_engine,
+        engine_urls=ENGINE_URLS,
+        get_active_workflows=lambda: app.state.active_workflows,
+        interval_seconds=float(os.getenv("OS42_SCHEDULER_INTERVAL_SECONDS", "300")),
+    )
+    app.state.scheduler.start()
+
     yield
 
+    await app.state.scheduler.stop()
     logger.info("os42_orchestrator_shutting_down")
 
 
@@ -212,6 +227,28 @@ async def dashboard_activity():
         "recent_errors": [],
         "system_events": []
     }
+
+
+# === Autonomous Scheduler ===
+
+@app.get("/scheduler/status")
+async def scheduler_status():
+    """Get autonomous scheduler status (system-wide operational info, not tenant data)"""
+    return app.state.scheduler.status()
+
+
+@app.post("/scheduler/pause", dependencies=[Depends(require_admin)])
+async def scheduler_pause():
+    """Stop the scheduler from applying decisions, without tearing down the loop (admin only)"""
+    app.state.scheduler.pause()
+    return {"status": "paused"}
+
+
+@app.post("/scheduler/resume", dependencies=[Depends(require_admin)])
+async def scheduler_resume():
+    """Resume autonomous decision application (admin only)"""
+    app.state.scheduler.resume()
+    return {"status": "resumed"}
 
 
 # === Service Discovery ===
