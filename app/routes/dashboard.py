@@ -369,7 +369,7 @@ async def dashboard():
             const SERVICES = [
                 'content', 'marketing', 'analytics', 'monitoring',
                 'notification', 'sales', 'revenue', 'integration',
-                'pricing', 'support', 'governance'
+                'support', 'governance'
             ];
 
             async function refreshDashboard() {

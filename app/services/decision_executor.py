@@ -21,6 +21,7 @@ from typing import Any, Dict, Optional, Tuple
 import httpx
 import structlog
 
+from app.config import engine_auth_headers
 from app.services.metrics_aggregator import OptimizationAction
 from app.services.optimization_engine import OptimizationDecision
 
@@ -29,6 +30,15 @@ logger = structlog.get_logger()
 # Which engine owns each optimization action, and which endpoint on that
 # engine applies it. PAUSE/RESUME are handled separately - they never
 # leave the orchestrator.
+#
+# 2026-08-10 reconciliation note: none of these 5 endpoint paths were
+# verified against real engine code, and a fleet-wide check found NONE of
+# scale_budget/adjust_frequency/change_format/change_channel/adjust_timing
+# exist anywhere in marketing-automation-engine or content-engine - not a
+# wrong-path bug, there's genuinely nothing to call yet. Left as-is
+# (flagged, not silently dropped) rather than pointed at something else
+# invented; calls will keep failing honestly (status: "failed") until
+# real engine-side work adds this functionality. See CLAUDE.md.
 ACTION_ENGINE_MAP: Dict[OptimizationAction, Tuple[str, str]] = {
     OptimizationAction.SCALE_BUDGET: ("marketing", "scale_budget"),
     OptimizationAction.INCREASE_FREQUENCY: ("marketing", "adjust_frequency"),
@@ -135,7 +145,7 @@ class DecisionExecutor:
         }
 
         try:
-            response = await self.client.post(f"{engine_url}/{endpoint}", json=payload)
+            response = await self.client.post(f"{engine_url}/{endpoint}", json=payload, headers=engine_auth_headers())
             response.raise_for_status()
             return ExecutionResult(
                 workflow_id=decision.workflow_id, tenant_id=decision.tenant_id,

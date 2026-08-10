@@ -65,80 +65,88 @@ def create_content_pillar_workflow(
     content_type: str = "blog_post"
 ) -> Workflow:
     """
-    Create a content pillar and repurpose it across channels
+    Create a content pillar, repurpose it, and distribute it to a platform.
 
-    Steps:
-    1. Create pillar content in content-engine
-    2. Repurpose into multiple formats (Twitter, LinkedIn, email)
-    3. Distribute across channels via marketing-automation-engine
-    4. Track monetization via revenue-operations-engine
-    5. Analyze performance via analytics-engine
+    Every step below is verified against real content-engine router code
+    (2026-08-10 reconciliation - see CLAUDE.md at the repo root). The
+    original version of this workflow called five invented actions
+    (content/create, content/repurpose, marketing/distribute,
+    revenue/create_offer, analytics/track) that never existed as real
+    routes anywhere in the fleet - none of it had ever actually run
+    against a real engine before this.
+
+    Real differences worth knowing:
+    - Distribution and content performance tracking both live on
+      content-engine itself, not marketing-automation-engine/
+      analytics-engine like the original version assumed.
+    - Distribution is genuinely two steps in the real API (record, then
+      execute) - content-engine's /distribution/{id}/execute reports an
+      honest failure if the target platform has no configured credentials,
+      it doesn't fake success.
+    - There is no monetization/"offer creation" endpoint anywhere in the
+      fleet - revenue-operations-engine is a real Stripe-backed billing/
+      subscription/invoicing system with no concept of "offers." The
+      monetize step from the original version is dropped rather than
+      pointed at something invented; add it back once/if that capability
+      exists somewhere real.
     """
     workflow = Workflow(
         workflow_id=f"pillar-{int(datetime.utcnow().timestamp())}",
         name="Content Pillar Creation & Distribution",
-        description="Create pillar content and distribute across all channels"
+        description="Create pillar content, repurpose it, and distribute it to a platform"
     )
 
-    # Step 1: Create pillar content
+    # Step 1: Generate pillar content — POST /content/generate
     workflow.add_step(
         engine="content",
-        action="create",
+        action="content/generate",
         params={
             "title": title,
             "topic": topic,
             "content_type": content_type,
-            "auto_publish": False
         },
         step_id="create_pillar"
     )
 
-    # Step 2: Repurpose content
+    # Step 2: Repurpose into other formats — POST /content/{id}/repurpose
     workflow.add_step(
         engine="content",
-        action="repurpose",
+        action="content/$steps.create_pillar.id/repurpose",
         params={
-            "content_id": "$steps.create_pillar.id",
-            "formats": ["twitter", "linkedin", "email", "newsletter"],
-            "ai_model": "gpt-4"
+            "target_types": ["social_media", "email_copy"],
         },
         step_id="repurpose_content"
     )
 
-    # Step 3: Distribute to channels
+    # Step 3: Record a distribution request — POST /distribution/publish
     workflow.add_step(
-        engine="marketing",
-        action="distribute",
+        engine="content",
+        action="distribution/publish",
         params={
             "content_id": "$steps.create_pillar.id",
-            "channels": ["wordpress", "dev_to", "substack"],
-            "schedule": "immediate"
+            "platform": "wordpress",
         },
-        step_id="distribute"
+        step_id="record_distribution"
     )
 
-    # Step 4: Set up monetization
+    # Step 4: Actually attempt the publish — POST /distribution/{id}/execute
     workflow.add_step(
-        engine="revenue",
-        action="create_offer",
-        params={
-            "content_id": "$steps.create_pillar.id",
-            "offer_type": "lead_magnet",
-            "value_ladder": ["free", "premium", "vip"]
-        },
-        step_id="monetize"
+        engine="content",
+        action="distribution/$steps.record_distribution.id/execute",
+        params={},
+        step_id="execute_distribution"
     )
 
-    # Step 5: Analyze performance
+    # Step 5: Initialize performance tracking — POST /analytics/content/{id}/track
     workflow.add_step(
-        engine="analytics",
-        action="track",
+        engine="content",
+        action="analytics/$steps.create_pillar.id/track",
         params={
-            "content_id": "$steps.create_pillar.id",
-            "metrics": ["views", "engagement", "conversions", "revenue"],
-            "dashboard": "content_performance"
+            "views": 0,
+            "engagements": 0,
+            "conversions": 0,
         },
-        step_id="analyze"
+        step_id="track"
     )
 
     return workflow
@@ -155,6 +163,19 @@ def create_daily_optimization_workflow() -> Workflow:
     3. Identify winners
     4. Adjust content strategy
     5. Generate optimization report
+
+    UNVERIFIED (2026-08-10 reconciliation - see CLAUDE.md): unlike
+    create_content_pillar_workflow, this template was never remapped to
+    real endpoints. This function is also never called anywhere in this
+    repo (confirmed by search) - it's aspirational, not exercised by any
+    test. A fleet-wide check found none of get_metrics/analyze_ab_tests/
+    identify_winners/update_strategy exist as real routes anywhere: real
+    A/B-test winner reporting exists, but folded into
+    GET /email/{id}/ab-results on marketing-automation-engine, not as
+    separate analyze/identify actions; real analytics-engine has
+    /metrics/real-time and /metrics/historical, not a generic get_metrics.
+    Left as-is (flagged, not silently dropped or half-fixed) pending a
+    real remapping pass.
     """
     workflow = Workflow(
         workflow_id=f"daily-optimize-{int(datetime.utcnow().timestamp())}",
@@ -220,6 +241,19 @@ def create_audience_growth_workflow() -> Workflow:
     2. Create targeted nurture sequences
     3. Launch nurture campaigns
     4. Track results
+
+    UNVERIFIED (2026-08-10 reconciliation - see CLAUDE.md): never remapped
+    to real endpoints, never called anywhere in this repo (confirmed by
+    search). A fleet-wide check found marketing-automation-engine has real
+    POST /segments/create (creating a segment) but no "segment_audience"
+    action; no create_nurture endpoint anywhere. POST /campaigns/create and
+    POST /campaigns/{id}/launch are real and callable (see
+    create_content_pillar_workflow's remapping pattern for how to do this
+    properly) but launch_campaign's own server-side implementation is
+    itself still a stub ("In production, this would update status..." -
+    see marketing-automation-engine/app/routers/campaigns.py). No
+    track_campaign endpoint exists. Left as-is pending a real remapping
+    pass.
     """
     workflow = Workflow(
         workflow_id=f"growth-{int(datetime.utcnow().timestamp())}",
