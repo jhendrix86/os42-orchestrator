@@ -15,10 +15,11 @@ from typing import Dict, Any, Optional
 from app.config import ENGINE_URLS
 from app.models.tenant import Tenant
 from app.routes.dashboard import router as dashboard_router
-from app.routes.optimization import router as optimization_router, optimization_engine
+from app.routes.optimization import router as optimization_router, optimization_engine, metrics_aggregator
 from app.routes.tenants import router as tenants_router
+from app.services.persistence import load_snapshot, save_snapshot
 from app.services.scheduler import AutonomousScheduler
-from app.services.tenancy import get_current_tenant, require_admin
+from app.services.tenancy import get_current_tenant, require_admin, registry as tenant_registry
 
 logger = structlog.get_logger()
 
@@ -36,21 +37,35 @@ async def lifespan(app: FastAPI):
     app.state.active_workflows = {}
     app.state.workflow_results = {}
 
+    # Persistence is opt-in (OS42_PERSISTENCE_PATH) - when unset this is a
+    # no-op and behavior is identical to every prior phase, pure in-memory.
+    if load_snapshot(tenant_registry, metrics_aggregator, optimization_engine,
+                      app.state.active_workflows, app.state.workflow_results):
+        logger.info("state_restored_from_snapshot")
+
+    def _persist(_summary):
+        save_snapshot(tenant_registry, metrics_aggregator, optimization_engine,
+                       app.state.active_workflows, app.state.workflow_results)
+
     # Autonomous scheduler: periodically re-optimizes and applies decisions
     # for every tenant's active workflows, so nothing has to call
     # POST /optimization/optimize/{id}/apply by hand. Ticks immediately on
-    # startup, then every interval_seconds.
+    # startup, then every interval_seconds. Also doubles as the persistence
+    # heartbeat via on_tick, so a crash loses at most one interval's data.
     app.state.scheduler = AutonomousScheduler(
         optimization_engine=optimization_engine,
         engine_urls=ENGINE_URLS,
         get_active_workflows=lambda: app.state.active_workflows,
         interval_seconds=float(os.getenv("OS42_SCHEDULER_INTERVAL_SECONDS", "300")),
+        on_tick=_persist,
     )
     app.state.scheduler.start()
 
     yield
 
     await app.state.scheduler.stop()
+    save_snapshot(tenant_registry, metrics_aggregator, optimization_engine,
+                   app.state.active_workflows, app.state.workflow_results)
     logger.info("os42_orchestrator_shutting_down")
 
 

@@ -55,11 +55,16 @@ class AutonomousScheduler:
         engine_urls: Dict[str, str],
         get_active_workflows: Callable[[], ActiveWorkflows],
         interval_seconds: float = 300.0,
+        on_tick: Optional[Callable[["TickSummary"], None]] = None,
     ):
         self.optimization_engine = optimization_engine
         self.engine_urls = engine_urls
         self.get_active_workflows = get_active_workflows
         self.interval_seconds = interval_seconds
+        # Optional hook fired after every tick (e.g. persisting a snapshot).
+        # Kept generic on purpose - the scheduler doesn't need to know what
+        # persistence is, just that something may want to react to a tick.
+        self.on_tick = on_tick
 
         self._task: Optional[asyncio.Task] = None
         self._paused = False
@@ -108,6 +113,13 @@ class AutonomousScheduler:
             tenants=summary.tenants_processed,
             workflows=summary.workflows_processed,
         )
+
+        if self.on_tick:
+            try:
+                self.on_tick(summary)
+            except Exception as e:
+                logger.error("scheduler_on_tick_hook_failed", error=str(e))
+
         return summary
 
     async def _run(self):

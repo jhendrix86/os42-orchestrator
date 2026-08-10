@@ -46,6 +46,16 @@ class TenantRegistry:
         self._by_key[tenant.api_key] = tenant
         return tenant
 
+    def restore(self, tenant: Tenant) -> None:
+        """
+        Insert an already-fully-formed Tenant, as when loading from a
+        persistence snapshot. Unlike register(), this never generates an
+        api_key or rejects an existing tenant_id - it preserves exactly
+        what was saved (same tenant_id, api_key, created_at).
+        """
+        self._by_id[tenant.tenant_id] = tenant
+        self._by_key[tenant.api_key] = tenant
+
     def get(self, tenant_id: str) -> Optional[Tenant]:
         return self._by_id.get(tenant_id)
 

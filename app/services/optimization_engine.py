@@ -48,6 +48,12 @@ class OptimizationEngine:
         # nested layout so a tenant can never read another tenant's history.
         self.execution_history: Dict[str, Dict[str, List[OptimizationDecision]]] = {}
 
+    def restore(self, decision: OptimizationDecision) -> None:
+        """Insert an already-made decision, as when loading from a persistence snapshot"""
+        self.decisions.append(decision)
+        tenant_history = self.execution_history.setdefault(decision.tenant_id, {})
+        tenant_history.setdefault(decision.workflow_id, []).append(decision)
+
     def analyze_and_optimize(self, workflow_id: str, period_hours: int = 24,
                               tenant_id: str = "default") -> OptimizationDecision:
         """Analyze workflow and generate optimization decision"""
