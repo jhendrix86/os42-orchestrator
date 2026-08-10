@@ -5,15 +5,18 @@ Central coordination layer that orchestrates all OS42 engines as a unified syste
 Runs real business workflows: content creation → distribution → monetization → analysis
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import os
 import structlog
 from datetime import datetime
 from typing import Dict, Any, Optional
+from app.models.tenant import Tenant
 from app.routes.dashboard import router as dashboard_router
 from app.routes.optimization import router as optimization_router
+from app.routes.tenants import router as tenants_router
+from app.services.tenancy import get_current_tenant
 
 logger = structlog.get_logger()
 
@@ -38,7 +41,10 @@ async def lifespan(app: FastAPI):
     """Application lifespan manager"""
     logger.info("os42_orchestrator_starting")
 
-    # Initialize global state
+    # Initialize global state.
+    # active_workflows / workflow_results are nested tenant_id -> workflow_id
+    # -> workflow dicts, so tenants can never see each other's workflows even
+    # if they happen to pick the same workflow_id.
     app.state.system_status = "healthy"
     app.state.active_workflows = {}
     app.state.workflow_results = {}
@@ -68,6 +74,7 @@ app.add_middleware(
 # Include routers
 app.include_router(dashboard_router)
 app.include_router(optimization_router)
+app.include_router(tenants_router)
 
 
 # === Health & Status ===
@@ -85,11 +92,12 @@ async def health_check():
 
 @app.get("/status")
 async def system_status():
-    """Get overall system status"""
+    """Get overall system status, across all tenants"""
     return {
         "system_status": app.state.system_status,
-        "active_workflows": len(app.state.active_workflows),
-        "completed_workflows": len(app.state.workflow_results),
+        "active_workflows": sum(len(wfs) for wfs in app.state.active_workflows.values()),
+        "completed_workflows": sum(len(wfs) for wfs in app.state.workflow_results.values()),
+        "tenants": len(app.state.active_workflows.keys() | app.state.workflow_results.keys()),
         "engines": {
             name: {"url": url, "status": "configured"}
             for name, url in ENGINE_URLS.items()
@@ -119,11 +127,17 @@ async def root():
 # === Workflow Management ===
 
 @app.post("/workflows/create")
-async def create_workflow(workflow_id: str, definition: Dict[str, Any]):
-    """Create a new workflow"""
+async def create_workflow(
+    workflow_id: str,
+    definition: Dict[str, Any],
+    tenant: Tenant = Depends(get_current_tenant)
+):
+    """Create a new workflow, scoped to the calling tenant"""
     try:
-        app.state.active_workflows[workflow_id] = {
+        tenant_workflows = app.state.active_workflows.setdefault(tenant.tenant_id, {})
+        tenant_workflows[workflow_id] = {
             "id": workflow_id,
+            "tenant_id": tenant.tenant_id,
             "definition": definition,
             "status": "pending",
             "created_at": datetime.utcnow().isoformat(),
@@ -132,6 +146,7 @@ async def create_workflow(workflow_id: str, definition: Dict[str, Any]):
 
         logger.info(
             "workflow_created",
+            tenant_id=tenant.tenant_id,
             workflow_id=workflow_id,
             step_count=len(definition.get("steps", []))
         )
@@ -147,25 +162,27 @@ async def create_workflow(workflow_id: str, definition: Dict[str, Any]):
 
 
 @app.get("/workflows/{workflow_id}")
-async def get_workflow(workflow_id: str):
-    """Get workflow status and results"""
-    if workflow_id not in app.state.active_workflows and \
-       workflow_id not in app.state.workflow_results:
+async def get_workflow(workflow_id: str, tenant: Tenant = Depends(get_current_tenant)):
+    """Get workflow status and results, scoped to the calling tenant"""
+    tenant_active = app.state.active_workflows.get(tenant.tenant_id, {})
+    tenant_results = app.state.workflow_results.get(tenant.tenant_id, {})
+
+    if workflow_id not in tenant_active and workflow_id not in tenant_results:
         raise HTTPException(status_code=404, detail="Workflow not found")
 
-    workflow = app.state.active_workflows.get(workflow_id) or \
-               app.state.workflow_results.get(workflow_id)
-
-    return workflow
+    return tenant_active.get(workflow_id) or tenant_results.get(workflow_id)
 
 
 @app.get("/workflows")
-async def list_workflows():
-    """List all workflows"""
+async def list_workflows(tenant: Tenant = Depends(get_current_tenant)):
+    """List all workflows owned by the calling tenant"""
+    tenant_active = app.state.active_workflows.get(tenant.tenant_id, {})
+    tenant_results = app.state.workflow_results.get(tenant.tenant_id, {})
+
     return {
-        "active_workflows": list(app.state.active_workflows.values()),
-        "completed_workflows": list(app.state.workflow_results.values()),
-        "total": len(app.state.active_workflows) + len(app.state.workflow_results)
+        "active_workflows": list(tenant_active.values()),
+        "completed_workflows": list(tenant_results.values()),
+        "total": len(tenant_active) + len(tenant_results)
     }
 
 
@@ -191,16 +208,21 @@ async def dashboard_metrics():
         "system": {
             "health": app.state.system_status,
             "engines_healthy": len(ENGINE_URLS),
-            "active_workflows": len(app.state.active_workflows)
+            "active_workflows": sum(len(wfs) for wfs in app.state.active_workflows.values())
         }
     }
 
 
 @app.get("/dashboard/activity")
 async def dashboard_activity():
-    """Get recent activity for the dashboard"""
+    """Get recent activity for the dashboard, across all tenants"""
+    recent_workflows = [
+        workflow
+        for tenant_workflows in app.state.active_workflows.values()
+        for workflow in tenant_workflows.values()
+    ]
     return {
-        "recent_workflows": list(app.state.active_workflows.values())[:5],
+        "recent_workflows": recent_workflows[:5],
         "recent_errors": [],
         "system_events": []
     }

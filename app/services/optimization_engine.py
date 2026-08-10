@@ -23,10 +23,12 @@ class OptimizationDecision:
     confidence: float  # 0-1, how confident we are
     estimated_impact: Optional[float] = None  # % improvement expected
     parameters: Dict[str, Any] = field(default_factory=dict)
+    tenant_id: str = "default"
 
     def to_dict(self):
         return {
             "workflow_id": self.workflow_id,
+            "tenant_id": self.tenant_id,
             "timestamp": self.timestamp.isoformat(),
             "action": self.action,
             "reason": self.reason,
@@ -42,30 +44,34 @@ class OptimizationEngine:
     def __init__(self, metrics_aggregator: MetricsAggregator):
         self.metrics = metrics_aggregator
         self.decisions: List[OptimizationDecision] = []
-        self.execution_history: Dict[str, List[OptimizationDecision]] = {}
+        # tenant_id -> workflow_id -> decisions, mirroring MetricsAggregator's
+        # nested layout so a tenant can never read another tenant's history.
+        self.execution_history: Dict[str, Dict[str, List[OptimizationDecision]]] = {}
 
-    def analyze_and_optimize(self, workflow_id: str, period_hours: int = 24) -> OptimizationDecision:
+    def analyze_and_optimize(self, workflow_id: str, period_hours: int = 24,
+                              tenant_id: str = "default") -> OptimizationDecision:
         """Analyze workflow and generate optimization decision"""
 
-        analysis = self.metrics.analyze_performance(workflow_id, period_hours)
+        analysis = self.metrics.analyze_performance(workflow_id, period_hours, tenant_id=tenant_id)
 
         decision = self._make_decision(analysis)
 
         # Track decision
         self.decisions.append(decision)
-        if workflow_id not in self.execution_history:
-            self.execution_history[workflow_id] = []
-        self.execution_history[workflow_id].append(decision)
+        tenant_history = self.execution_history.setdefault(tenant_id, {})
+        tenant_history.setdefault(workflow_id, []).append(decision)
 
         return decision
 
     def _make_decision(self, analysis: PerformanceAnalysis) -> OptimizationDecision:
         """Generate optimization decision from analysis"""
+        tenant_id = analysis.tenant_id
 
         # Rule 1: High conversion rate → Scale budget
         if analysis.conversion_rate and analysis.conversion_rate > 0.05:
             return OptimizationDecision(
                 workflow_id=analysis.workflow_id,
+                tenant_id=tenant_id,
                 timestamp=datetime.utcnow(),
                 action=OptimizationAction.SCALE_BUDGET,
                 reason="High conversion rate (>5%) detected. Scale to capture more market.",
@@ -78,6 +84,7 @@ class OptimizationEngine:
         if analysis.conversion_trend == "improving" and analysis.engagement_rate and analysis.engagement_rate > 0.05:
             return OptimizationDecision(
                 workflow_id=analysis.workflow_id,
+                tenant_id=tenant_id,
                 timestamp=datetime.utcnow(),
                 action=OptimizationAction.INCREASE_FREQUENCY,
                 reason="Positive trend with strong engagement. Run more frequently.",
@@ -90,6 +97,7 @@ class OptimizationEngine:
         if analysis.conversion_trend == "declining":
             return OptimizationDecision(
                 workflow_id=analysis.workflow_id,
+                tenant_id=tenant_id,
                 timestamp=datetime.utcnow(),
                 action=OptimizationAction.PAUSE,
                 reason="Declining conversion trend. Pause to prevent wasting budget.",
@@ -102,6 +110,7 @@ class OptimizationEngine:
         if analysis.error_rate and analysis.error_rate > 0.10:
             return OptimizationDecision(
                 workflow_id=analysis.workflow_id,
+                tenant_id=tenant_id,
                 timestamp=datetime.utcnow(),
                 action=OptimizationAction.PAUSE,
                 reason="High error rate (>10%). System needs attention.",
@@ -114,6 +123,7 @@ class OptimizationEngine:
         if analysis.engagement_rate and analysis.engagement_rate < 0.01:
             return OptimizationDecision(
                 workflow_id=analysis.workflow_id,
+                tenant_id=tenant_id,
                 timestamp=datetime.utcnow(),
                 action=OptimizationAction.CHANGE_FORMAT,
                 reason="Very low engagement (<1%). Try different content format.",
@@ -126,6 +136,7 @@ class OptimizationEngine:
         if analysis.avg_response_time and analysis.avg_response_time > 2000:
             return OptimizationDecision(
                 workflow_id=analysis.workflow_id,
+                tenant_id=tenant_id,
                 timestamp=datetime.utcnow(),
                 action=OptimizationAction.ADJUST_TIMING,
                 reason="Slow response times (>2s). Defer to off-peak hours.",
@@ -137,6 +148,7 @@ class OptimizationEngine:
         # Default: Monitor and hold
         return OptimizationDecision(
             workflow_id=analysis.workflow_id,
+            tenant_id=tenant_id,
             timestamp=datetime.utcnow(),
             action=OptimizationAction.RESUME,  # Continue as-is
             reason="Performance stable. Continue monitoring.",
@@ -145,12 +157,14 @@ class OptimizationEngine:
             parameters={}
         )
 
-    def get_top_opportunities(self, limit: int = 5) -> List[OptimizationDecision]:
-        """Get workflows with highest optimization potential"""
+    def get_top_opportunities(self, limit: int = 5, tenant_id: str = "default") -> List[OptimizationDecision]:
+        """Get workflows with highest optimization potential, scoped to a single tenant"""
 
         # Rank by estimated impact * confidence
         scored = []
         for decision in self.decisions:
+            if decision.tenant_id != tenant_id:
+                continue
             if decision.estimated_impact:
                 score = decision.estimated_impact * decision.confidence
                 scored.append((score, decision))
@@ -160,17 +174,19 @@ class OptimizationEngine:
 
         return [d for _, d in scored[:limit]]
 
-    def recommend_workflow_sequence(self, available_workflows: List[Dict[str, Any]]) -> List[str]:
-        """Recommend order to run workflows for maximum daily impact"""
+    def recommend_workflow_sequence(self, available_workflows: List[Dict[str, Any]],
+                                     tenant_id: str = "default") -> List[str]:
+        """Recommend order to run workflows for maximum daily impact, scoped to a single tenant"""
 
         # Score each workflow
         workflow_scores: Dict[str, float] = {}
+        tenant_history = self.execution_history.get(tenant_id, {})
 
         for workflow in available_workflows:
             workflow_id = workflow["id"]
 
             # Get latest analysis
-            latest_decisions = self.execution_history.get(workflow_id, [])
+            latest_decisions = tenant_history.get(workflow_id, [])
             if not latest_decisions:
                 # No history, default score
                 workflow_scores[workflow_id] = 0.5
@@ -203,14 +219,14 @@ class OptimizationEngine:
 
         return [wf_id for wf_id, _ in sorted_workflows]
 
-    def get_execution_history(self, workflow_id: str) -> List[OptimizationDecision]:
-        """Get optimization history for a workflow"""
-        return self.execution_history.get(workflow_id, [])
+    def get_execution_history(self, workflow_id: str, tenant_id: str = "default") -> List[OptimizationDecision]:
+        """Get optimization history for a workflow, scoped to a single tenant"""
+        return self.execution_history.get(tenant_id, {}).get(workflow_id, [])
 
-    def should_run_workflow(self, workflow_id: str) -> bool:
+    def should_run_workflow(self, workflow_id: str, tenant_id: str = "default") -> bool:
         """Determine if a workflow should run based on latest decision"""
 
-        latest_decisions = self.execution_history.get(workflow_id, [])
+        latest_decisions = self.get_execution_history(workflow_id, tenant_id=tenant_id)
         if not latest_decisions:
             return True  # No history, should run
 

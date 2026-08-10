@@ -23,32 +23,31 @@ def test_dashboard_endpoints():
 
     # Try importing the app - if it fails, we'll get an error
     try:
-        client = TestClient(app)
+        with TestClient(app) as client:
+            # Test health
+            response = client.get("/health")
+            assert response.status_code == 200, f"Health check failed: {response.text}"
 
-        # Test health
-        response = client.get("/health")
-        assert response.status_code == 200, f"Health check failed: {response.text}"
+            # Test status
+            response = client.get("/status")
+            assert response.status_code == 200, f"Status check failed: {response.text}"
+            data = response.json()
+            assert "active_workflows" in data
+            assert "completed_workflows" in data
 
-        # Test status
-        response = client.get("/status")
-        assert response.status_code == 200, f"Status check failed: {response.text}"
-        data = response.json()
-        assert "active_workflows" in data
-        assert "completed_workflows" in data
+            # Test dashboard HTML
+            response = client.get("/dashboard/")
+            assert response.status_code == 200, f"Dashboard HTML failed: {response.text}"
+            assert "OS42 Orchestrator" in response.text
+            assert "Services Status" in response.text
+            assert "Active Workflows" in response.text
 
-        # Test dashboard HTML
-        response = client.get("/dashboard/")
-        assert response.status_code == 200, f"Dashboard HTML failed: {response.text}"
-        assert "OS42 Orchestrator" in response.text
-        assert "Services Status" in response.text
-        assert "Active Workflows" in response.text
-
-        # Test services endpoint
-        response = client.get("/services")
-        assert response.status_code == 200, f"Services endpoint failed: {response.text}"
-        data = response.json()
-        assert "services" in data
-        assert len(data["services"]) > 0
+            # Test services endpoint
+            response = client.get("/services")
+            assert response.status_code == 200, f"Services endpoint failed: {response.text}"
+            data = response.json()
+            assert "services" in data
+            assert len(data["services"]) > 0
 
         print("\n[OK] All dashboard tests passed!")
         print("  - Health endpoint working")

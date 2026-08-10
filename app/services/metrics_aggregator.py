@@ -43,6 +43,7 @@ class MetricPoint:
     value: float
     engine: str
     workflow_id: Optional[str] = None
+    tenant_id: str = "default"
     context: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self):
@@ -52,6 +53,7 @@ class MetricPoint:
             "value": self.value,
             "engine": self.engine,
             "workflow_id": self.workflow_id,
+            "tenant_id": self.tenant_id,
             "context": self.context
         }
 
@@ -63,6 +65,7 @@ class PerformanceAnalysis:
     period_start: datetime
     period_end: datetime
     metrics: Dict[MetricType, List[float]]
+    tenant_id: str = "default"
 
     # Computed metrics
     conversion_rate: Optional[float] = None
@@ -82,6 +85,7 @@ class PerformanceAnalysis:
     def to_dict(self):
         return {
             "workflow_id": self.workflow_id,
+            "tenant_id": self.tenant_id,
             "period_start": self.period_start.isoformat(),
             "period_end": self.period_end.isoformat(),
             "conversion_rate": self.conversion_rate,
@@ -101,25 +105,26 @@ class MetricsAggregator:
 
     def __init__(self):
         self.metrics: List[MetricPoint] = []
-        self.workflow_metrics: Dict[str, List[MetricPoint]] = {}
+        # tenant_id -> workflow_id -> points. Nesting (rather than a
+        # composite key) keeps cross-tenant isolation structural: a lookup
+        # for one tenant can never reach into another tenant's bucket, even
+        # if both happen to use the same workflow_id.
+        self.workflow_metrics: Dict[str, Dict[str, List[MetricPoint]]] = {}
 
     def add_metric(self, metric: MetricPoint):
         """Add a metric point"""
         self.metrics.append(metric)
 
         if metric.workflow_id:
-            if metric.workflow_id not in self.workflow_metrics:
-                self.workflow_metrics[metric.workflow_id] = []
-            self.workflow_metrics[metric.workflow_id].append(metric)
+            tenant_bucket = self.workflow_metrics.setdefault(metric.tenant_id, {})
+            tenant_bucket.setdefault(metric.workflow_id, []).append(metric)
 
     def get_metrics(self, workflow_id: str, metric_type: Optional[MetricType] = None,
                    start_time: Optional[datetime] = None,
-                   end_time: Optional[datetime] = None) -> List[MetricPoint]:
-        """Get metrics for a workflow"""
-        if workflow_id not in self.workflow_metrics:
-            return []
-
-        metrics = self.workflow_metrics[workflow_id]
+                   end_time: Optional[datetime] = None,
+                   tenant_id: str = "default") -> List[MetricPoint]:
+        """Get metrics for a workflow, scoped to a single tenant"""
+        metrics = self.workflow_metrics.get(tenant_id, {}).get(workflow_id, [])
 
         # Filter by metric type
         if metric_type:
@@ -133,13 +138,14 @@ class MetricsAggregator:
 
         return metrics
 
-    def compute_conversion_rate(self, workflow_id: str, period_hours: int = 24) -> Optional[float]:
+    def compute_conversion_rate(self, workflow_id: str, period_hours: int = 24,
+                                 tenant_id: str = "default") -> Optional[float]:
         """Compute conversion rate over period"""
         end_time = datetime.utcnow()
         start_time = end_time - timedelta(hours=period_hours)
 
-        conversions = self.get_metrics(workflow_id, MetricType.CONVERSIONS, start_time, end_time)
-        views = self.get_metrics(workflow_id, MetricType.VIEWS, start_time, end_time)
+        conversions = self.get_metrics(workflow_id, MetricType.CONVERSIONS, start_time, end_time, tenant_id=tenant_id)
+        views = self.get_metrics(workflow_id, MetricType.VIEWS, start_time, end_time, tenant_id=tenant_id)
 
         if not views:
             return None
@@ -152,13 +158,14 @@ class MetricsAggregator:
 
         return total_conversions / total_views
 
-    def compute_revenue_per_conversion(self, workflow_id: str, period_hours: int = 24) -> Optional[float]:
+    def compute_revenue_per_conversion(self, workflow_id: str, period_hours: int = 24,
+                                        tenant_id: str = "default") -> Optional[float]:
         """Compute revenue per conversion"""
         end_time = datetime.utcnow()
         start_time = end_time - timedelta(hours=period_hours)
 
-        conversions = self.get_metrics(workflow_id, MetricType.CONVERSIONS, start_time, end_time)
-        revenue = self.get_metrics(workflow_id, MetricType.REVENUE, start_time, end_time)
+        conversions = self.get_metrics(workflow_id, MetricType.CONVERSIONS, start_time, end_time, tenant_id=tenant_id)
+        revenue = self.get_metrics(workflow_id, MetricType.REVENUE, start_time, end_time, tenant_id=tenant_id)
 
         if not conversions:
             return None
@@ -171,13 +178,14 @@ class MetricsAggregator:
 
         return total_revenue / total_conversions
 
-    def compute_engagement_rate(self, workflow_id: str, period_hours: int = 24) -> Optional[float]:
+    def compute_engagement_rate(self, workflow_id: str, period_hours: int = 24,
+                                 tenant_id: str = "default") -> Optional[float]:
         """Compute engagement rate (clicks/views)"""
         end_time = datetime.utcnow()
         start_time = end_time - timedelta(hours=period_hours)
 
-        clicks = self.get_metrics(workflow_id, MetricType.CLICKS, start_time, end_time)
-        views = self.get_metrics(workflow_id, MetricType.VIEWS, start_time, end_time)
+        clicks = self.get_metrics(workflow_id, MetricType.CLICKS, start_time, end_time, tenant_id=tenant_id)
+        views = self.get_metrics(workflow_id, MetricType.VIEWS, start_time, end_time, tenant_id=tenant_id)
 
         if not views:
             return None
@@ -190,15 +198,16 @@ class MetricsAggregator:
 
         return total_clicks / total_views
 
-    def analyze_performance(self, workflow_id: str, period_hours: int = 24) -> PerformanceAnalysis:
-        """Analyze workflow performance over period"""
+    def analyze_performance(self, workflow_id: str, period_hours: int = 24,
+                             tenant_id: str = "default") -> PerformanceAnalysis:
+        """Analyze workflow performance over period, scoped to a single tenant"""
         end_time = datetime.utcnow()
         start_time = end_time - timedelta(hours=period_hours)
 
         # Collect all metric types
         metrics_by_type: Dict[MetricType, List[float]] = {}
         for metric_type in MetricType:
-            points = self.get_metrics(workflow_id, metric_type, start_time, end_time)
+            points = self.get_metrics(workflow_id, metric_type, start_time, end_time, tenant_id=tenant_id)
             metrics_by_type[metric_type] = [m.value for m in points]
 
         # Create analysis
@@ -206,13 +215,14 @@ class MetricsAggregator:
             workflow_id=workflow_id,
             period_start=start_time,
             period_end=end_time,
-            metrics=metrics_by_type
+            metrics=metrics_by_type,
+            tenant_id=tenant_id
         )
 
         # Compute derived metrics
-        analysis.conversion_rate = self.compute_conversion_rate(workflow_id, period_hours)
-        analysis.revenue_per_conversion = self.compute_revenue_per_conversion(workflow_id, period_hours)
-        analysis.engagement_rate = self.compute_engagement_rate(workflow_id, period_hours)
+        analysis.conversion_rate = self.compute_conversion_rate(workflow_id, period_hours, tenant_id=tenant_id)
+        analysis.revenue_per_conversion = self.compute_revenue_per_conversion(workflow_id, period_hours, tenant_id=tenant_id)
+        analysis.engagement_rate = self.compute_engagement_rate(workflow_id, period_hours, tenant_id=tenant_id)
 
         if metrics_by_type.get(MetricType.RESPONSE_TIME):
             analysis.avg_response_time = sum(metrics_by_type[MetricType.RESPONSE_TIME]) / len(metrics_by_type[MetricType.RESPONSE_TIME])
