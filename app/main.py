@@ -8,10 +8,10 @@ Runs real business workflows: content creation → distribution → monetization
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
-import os
 import structlog
 from datetime import datetime
 from typing import Dict, Any, Optional
+from app.config import ENGINE_URLS
 from app.models.tenant import Tenant
 from app.routes.dashboard import router as dashboard_router
 from app.routes.optimization import router as optimization_router
@@ -19,21 +19,6 @@ from app.routes.tenants import router as tenants_router
 from app.services.tenancy import get_current_tenant
 
 logger = structlog.get_logger()
-
-# Engine service URLs (configurable via environment)
-ENGINE_URLS = {
-    "content": os.getenv("CONTENT_ENGINE_URL", "http://localhost:8038"),
-    "marketing": os.getenv("MARKETING_ENGINE_URL", "http://localhost:8039"),
-    "analytics": os.getenv("ANALYTICS_ENGINE_URL", "http://localhost:8042"),
-    "monitoring": os.getenv("MONITORING_ENGINE_URL", "http://localhost:8044"),
-    "notification": os.getenv("NOTIFICATION_ENGINE_URL", "http://localhost:8045"),
-    "sales": os.getenv("SALES_ENGINE_URL", "http://localhost:8041"),
-    "revenue": os.getenv("REVENUE_ENGINE_URL", "http://localhost:8036"),
-    "integration": os.getenv("INTEGRATION_ENGINE_URL", "http://localhost:8040"),
-    "pricing": os.getenv("PRICING_ENGINE_URL", "http://localhost:8047"),
-    "support": os.getenv("SUPPORT_ENGINE_URL", "http://localhost:8037"),
-    "governance": os.getenv("GOVERNANCE_ENGINE_URL", "http://localhost:8043"),
-}
 
 
 @asynccontextmanager
@@ -141,7 +126,8 @@ async def create_workflow(
             "definition": definition,
             "status": "pending",
             "created_at": datetime.utcnow().isoformat(),
-            "steps": []
+            "steps": [],
+            "applied_decisions": []
         }
 
         logger.info(

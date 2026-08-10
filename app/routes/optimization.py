@@ -6,11 +6,13 @@ Every endpoint is scoped to the tenant resolved from the X-API-Key header -
 callers only ever see their own metrics, decisions, and recommendations.
 """
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from datetime import datetime, timedelta
 from typing import List, Optional
 
+from app.config import ENGINE_URLS
 from app.models.tenant import Tenant
+from app.services.decision_executor import DecisionExecutor
 from app.services.metrics_aggregator import MetricsAggregator, MetricPoint, MetricType
 from app.services.optimization_engine import OptimizationEngine
 from app.services.tenancy import get_current_tenant
@@ -126,6 +128,44 @@ async def optimize_workflow(
     return {
         "workflow_id": workflow_id,
         "decision": decision.to_dict()
+    }
+
+
+@router.post("/optimize/{workflow_id}/apply")
+async def optimize_and_apply_workflow(
+    workflow_id: str, request: Request, hours: int = Query(24, ge=1, le=720),
+    tenant: Tenant = Depends(get_current_tenant)
+):
+    """
+    Generate a fresh optimization decision and immediately apply it -
+    closes the loop from recommendation to actual effect. PAUSE/RESUME
+    update the workflow's local status; other actions call the owning
+    engine (best-effort - an unreachable engine is reported, not raised).
+    """
+    decision = optimization_engine.analyze_and_optimize(workflow_id, hours, tenant_id=tenant.tenant_id)
+
+    tenant_workflows = request.app.state.active_workflows.get(tenant.tenant_id, {})
+    workflow = tenant_workflows.get(workflow_id)
+
+    # One-shot client per call - this is a low-frequency autonomous action,
+    # not a hot path, so the connection setup cost is an acceptable tradeoff
+    # for not having to manage a shared client's lifecycle across requests.
+    executor = DecisionExecutor(engine_urls=ENGINE_URLS)
+    try:
+        result = await executor.apply(decision, workflow)
+    finally:
+        await executor.aclose()
+
+    if workflow is not None:
+        workflow.setdefault("applied_decisions", []).append({
+            "decision": decision.to_dict(),
+            "result": result.to_dict(),
+        })
+
+    return {
+        "workflow_id": workflow_id,
+        "decision": decision.to_dict(),
+        "execution": result.to_dict()
     }
 
 
