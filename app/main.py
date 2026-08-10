@@ -20,8 +20,14 @@ from app.routes.tenants import router as tenants_router
 from app.services.persistence import load_snapshot, save_snapshot
 from app.services.scheduler import AutonomousScheduler
 from app.services.tenancy import get_current_tenant, require_admin, registry as tenant_registry
+from app.services.workflow_executor import WorkflowExecutor
 
 logger = structlog.get_logger()
+
+# Runs a workflow's DSL steps against the engines. Module-level singleton
+# (tests can inject a fake client before the lifespan connects it) - see
+# lifespan below for connect()/disconnect().
+workflow_executor = WorkflowExecutor(ENGINE_URLS)
 
 
 @asynccontextmanager
@@ -36,6 +42,8 @@ async def lifespan(app: FastAPI):
     app.state.system_status = "healthy"
     app.state.active_workflows = {}
     app.state.workflow_results = {}
+
+    await workflow_executor.connect()
 
     # Persistence is opt-in (OS42_PERSISTENCE_PATH) - when unset this is a
     # no-op and behavior is identical to every prior phase, pure in-memory.
@@ -66,6 +74,7 @@ async def lifespan(app: FastAPI):
     await app.state.scheduler.stop()
     save_snapshot(tenant_registry, metrics_aggregator, optimization_engine,
                    app.state.active_workflows, app.state.workflow_results)
+    await workflow_executor.disconnect()
     logger.info("os42_orchestrator_shutting_down")
 
 
@@ -175,6 +184,33 @@ async def create_workflow(
     except Exception as e:
         logger.error("workflow_creation_failed", error=str(e))
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/workflows/{workflow_id}/execute")
+async def execute_workflow(workflow_id: str, tenant: Tenant = Depends(get_current_tenant)):
+    """
+    Run a previously-created workflow's steps once via WorkflowExecutor.
+
+    Records the outcome as `last_execution` on the workflow record without
+    touching `status`, which is reserved for the pause/resume optimization
+    lifecycle (see DecisionExecutor) - a workflow can be "paused" for
+    scheduling purposes and still have its steps run here on demand, and
+    running its steps doesn't implicitly resume it.
+    """
+    tenant_workflows = app.state.active_workflows.get(tenant.tenant_id, {})
+    workflow = tenant_workflows.get(workflow_id)
+    if workflow is None:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    result = await workflow_executor.execute_workflow(workflow_id, workflow["definition"])
+    workflow["last_execution"] = result
+
+    logger.info(
+        "workflow_executed",
+        tenant_id=tenant.tenant_id, workflow_id=workflow_id, status=result["status"]
+    )
+
+    return {"workflow_id": workflow_id, "execution": result}
 
 
 @app.get("/workflows/{workflow_id}")

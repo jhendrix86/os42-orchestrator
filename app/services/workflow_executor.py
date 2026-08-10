@@ -15,17 +15,21 @@ logger = structlog.get_logger()
 class WorkflowExecutor:
     """Executes workflow definitions by calling orchestrated engines"""
 
-    def __init__(self, engine_urls: Dict[str, str]):
+    def __init__(self, engine_urls: Dict[str, str], client: Optional[httpx.AsyncClient] = None):
         self.engine_urls = engine_urls
-        self.client = None
+        # Tests inject an httpx.AsyncClient bound to an ASGITransport so
+        # engine calls hit an in-process fake instead of the network.
+        self._owns_client = client is None
+        self.client = client
 
     async def connect(self):
-        """Create async HTTP client"""
-        self.client = httpx.AsyncClient(timeout=30.0)
+        """Create async HTTP client, unless one was already injected"""
+        if self.client is None:
+            self.client = httpx.AsyncClient(timeout=30.0)
 
     async def disconnect(self):
-        """Close async HTTP client"""
-        if self.client:
+        """Close async HTTP client, unless it was injected (caller owns it)"""
+        if self.client and self._owns_client:
             await self.client.aclose()
 
     async def execute_workflow(
