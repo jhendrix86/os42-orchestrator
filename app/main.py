@@ -12,6 +12,7 @@ import os
 import structlog
 from datetime import datetime
 from typing import Dict, Any, Optional
+from app.routes.dashboard import router as dashboard_router
 
 logger = structlog.get_logger()
 
@@ -62,6 +63,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Include routers
+app.include_router(dashboard_router)
 
 
 # === Health & Status ===
