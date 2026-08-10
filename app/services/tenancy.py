@@ -33,6 +33,7 @@ class TenantRegistry:
         tenant_id: Optional[str] = None,
         api_key: Optional[str] = None,
         plan: str = "standard",
+        goal: str = "balanced",
     ) -> Tenant:
         """Provision a new tenant. Raises ValueError if tenant_id is taken."""
         tenant_id = tenant_id or name.lower().replace(" ", "-")
@@ -40,7 +41,7 @@ class TenantRegistry:
             raise ValueError(f"Tenant '{tenant_id}' already exists")
 
         api_key = api_key or f"os42_{secrets.token_urlsafe(24)}"
-        tenant = Tenant(tenant_id=tenant_id, name=name, api_key=api_key, plan=plan)
+        tenant = Tenant(tenant_id=tenant_id, name=name, api_key=api_key, plan=plan, goal=goal)
 
         self._by_id[tenant.tenant_id] = tenant
         self._by_key[tenant.api_key] = tenant

@@ -184,10 +184,13 @@ async def get_workflow_recommendations(
         tenant_history = optimization_engine.execution_history.get(tenant.tenant_id, {})
         workflows = [{"id": wf_id} for wf_id in tenant_history.keys()]
 
-    sequence = optimization_engine.recommend_workflow_sequence(workflows, tenant_id=tenant.tenant_id)
+    sequence = optimization_engine.recommend_workflow_sequence(
+        workflows, tenant_id=tenant.tenant_id, goal=tenant.goal
+    )
 
     return {
         "recommended_sequence": sequence,
+        "goal": tenant.goal,
         "count": len(sequence),
         "details": [
             {

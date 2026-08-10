@@ -39,7 +39,7 @@ SNAPSHOT_VERSION = 1
 def _tenant_to_row(t: Tenant) -> Dict[str, Any]:
     return {
         "tenant_id": t.tenant_id, "name": t.name, "api_key": t.api_key,
-        "plan": t.plan, "created_at": t.created_at.isoformat(),
+        "plan": t.plan, "goal": t.goal, "created_at": t.created_at.isoformat(),
     }
 
 
@@ -132,7 +132,8 @@ def load_snapshot(
     for row in snapshot.get("tenants", []):
         tenant_registry.restore(Tenant(
             tenant_id=row["tenant_id"], name=row["name"], api_key=row["api_key"],
-            plan=row["plan"], created_at=datetime.fromisoformat(row["created_at"]),
+            plan=row["plan"], goal=row.get("goal", "balanced"),  # old snapshots predate goal
+            created_at=datetime.fromisoformat(row["created_at"]),
         ))
 
     for row in snapshot.get("metrics", []):

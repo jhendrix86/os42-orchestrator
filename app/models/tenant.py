@@ -14,6 +14,9 @@ class Tenant:
     name: str
     api_key: str
     plan: str = "standard"
+    # Business objective biasing how OptimizationEngine.recommend_workflow_sequence
+    # prioritizes this tenant's workflows - see optimization_engine.GOAL_ACTION_BONUS.
+    goal: str = "balanced"
     created_at: datetime = field(default_factory=datetime.utcnow)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -22,5 +25,6 @@ class Tenant:
             "tenant_id": self.tenant_id,
             "name": self.name,
             "plan": self.plan,
+            "goal": self.goal,
             "created_at": self.created_at.isoformat(),
         }

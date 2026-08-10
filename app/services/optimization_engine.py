@@ -12,6 +12,57 @@ import json
 
 from app.services.metrics_aggregator import MetricsAggregator, PerformanceAnalysis, OptimizationAction
 
+# Per-goal weighting for recommend_workflow_sequence()'s priority scoring.
+# A tenant's stated goal (Tenant.goal) biases which of its own workflows get
+# sequenced first - the same underlying decision (still driven purely by
+# that workflow's own metrics; see OptimizationEngine._make_decision) can
+# rank very differently depending on what the tenant says it's optimizing
+# for. "balanced" reproduces the original, goal-unaware weights exactly.
+GOAL_ACTION_BONUS: Dict[str, Dict[OptimizationAction, float]] = {
+    "balanced": {
+        OptimizationAction.SCALE_BUDGET: 1.0,
+        OptimizationAction.INCREASE_FREQUENCY: 0.8,
+        OptimizationAction.CHANGE_FORMAT: 0.5,
+        OptimizationAction.ADJUST_TIMING: 0.3,
+        OptimizationAction.PAUSE: -1.0,
+        OptimizationAction.RESUME: 0.0,
+        OptimizationAction.CHANGE_CHANNEL: 0.4,
+        OptimizationAction.DECREASE_FREQUENCY: -0.5,
+    },
+    "maximize_growth": {
+        OptimizationAction.SCALE_BUDGET: 2.0,
+        OptimizationAction.INCREASE_FREQUENCY: 1.5,
+        OptimizationAction.CHANGE_FORMAT: 0.3,
+        OptimizationAction.ADJUST_TIMING: 0.2,
+        OptimizationAction.PAUSE: -0.3,
+        OptimizationAction.RESUME: 0.5,
+        OptimizationAction.CHANGE_CHANNEL: 0.4,
+        OptimizationAction.DECREASE_FREQUENCY: -1.0,
+    },
+    "minimize_risk": {
+        OptimizationAction.SCALE_BUDGET: 0.3,
+        OptimizationAction.INCREASE_FREQUENCY: 0.1,
+        OptimizationAction.CHANGE_FORMAT: 0.2,
+        OptimizationAction.ADJUST_TIMING: 0.3,
+        OptimizationAction.PAUSE: 0.5,
+        OptimizationAction.RESUME: 0.0,
+        OptimizationAction.CHANGE_CHANNEL: 0.1,
+        OptimizationAction.DECREASE_FREQUENCY: 0.4,
+    },
+    "maximize_engagement": {
+        OptimizationAction.SCALE_BUDGET: 0.5,
+        OptimizationAction.INCREASE_FREQUENCY: 0.6,
+        OptimizationAction.CHANGE_FORMAT: 1.5,
+        OptimizationAction.ADJUST_TIMING: 0.4,
+        OptimizationAction.PAUSE: -0.8,
+        OptimizationAction.RESUME: 0.2,
+        OptimizationAction.CHANGE_CHANNEL: 1.2,
+        OptimizationAction.DECREASE_FREQUENCY: -0.5,
+    },
+}
+
+VALID_GOALS = frozenset(GOAL_ACTION_BONUS.keys())
+
 
 @dataclass
 class OptimizationDecision:
@@ -181,12 +232,17 @@ class OptimizationEngine:
         return [d for _, d in scored[:limit]]
 
     def recommend_workflow_sequence(self, available_workflows: List[Dict[str, Any]],
-                                     tenant_id: str = "default") -> List[str]:
-        """Recommend order to run workflows for maximum daily impact, scoped to a single tenant"""
+                                     tenant_id: str = "default", goal: str = "balanced") -> List[str]:
+        """
+        Recommend order to run workflows for maximum daily impact, scoped to
+        a single tenant. `goal` selects which action gets weighted highest -
+        see GOAL_ACTION_BONUS; an unrecognized goal falls back to "balanced".
+        """
 
         # Score each workflow
         workflow_scores: Dict[str, float] = {}
         tenant_history = self.execution_history.get(tenant_id, {})
+        action_bonus = GOAL_ACTION_BONUS.get(goal, GOAL_ACTION_BONUS["balanced"])
 
         for workflow in available_workflows:
             workflow_id = workflow["id"]
@@ -204,18 +260,6 @@ class OptimizationEngine:
             base_score = latest.confidence
             if latest.estimated_impact:
                 base_score *= (1 + latest.estimated_impact)
-
-            # Adjust for action type
-            action_bonus = {
-                OptimizationAction.SCALE_BUDGET: 1.0,
-                OptimizationAction.INCREASE_FREQUENCY: 0.8,
-                OptimizationAction.CHANGE_FORMAT: 0.5,
-                OptimizationAction.ADJUST_TIMING: 0.3,
-                OptimizationAction.PAUSE: -1.0,
-                OptimizationAction.RESUME: 0.0,
-                OptimizationAction.CHANGE_CHANNEL: 0.4,
-                OptimizationAction.DECREASE_FREQUENCY: -0.5,
-            }
 
             adjusted_score = base_score + action_bonus.get(latest.action, 0)
             workflow_scores[workflow_id] = max(0, adjusted_score)
