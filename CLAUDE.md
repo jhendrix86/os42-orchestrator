@@ -52,6 +52,44 @@ authoritative, actively-maintained status docs, not this repo:**
   part was correct and stays. It's specifically *inbound* auth (clients
   calling this orchestrator) that should NOT be swapped to unkey-auth.
 
+## Resolved: WorkflowExecutor vs. baselayer/core_loop (2026-08-10)
+
+The Phase H completion doc left open whether `app/services/workflow_executor.py`'s
+`WorkflowExecutor` should be replaced by `baselayer/backend/src/baselayer/core_loop`'s
+more mature `WorkflowEngine`/`WorkflowExecutor`/`WorkflowScheduler` trio (real
+DB persistence, dependency-graph parallel execution, exponential/linear/fixed
+retry/backoff, cron scheduling). Researched properly (not guessed) and
+**resolved: keep this repo's `WorkflowExecutor` as-is.** Don't migrate it.
+
+Why, concretely:
+
+- baselayer's one step type that could call an external HTTP service
+  (`type: webhook`) is a stub in both `engine.py` and `executor.py` — the
+  comment literally says `# In real implementation, this would use httpx or
+  aiohttp` and never does. Grepping the whole `core_loop/` subsystem for
+  `httpx|requests\.|aiohttp` turns up only that dead comment. It cannot call
+  a named sibling engine over HTTP at all today.
+- It has no equivalent of `$steps.step_id.field` parameter resolution or the
+  action-path templating (`content/$steps.create_pillar.id/repurpose`) that
+  `create_content_pillar_workflow` depends on for 4 of its 5 steps. Step
+  data flow there is just a raw `context` dict handed to a (stub) handler.
+- Its `Workflow`/`WorkflowExecution` models have **no `tenant_id` column at
+  all** — weaker tenant isolation than what this repo already enforces on
+  every route via `app.state.active_workflows[tenant_id][workflow_id]`.
+  Migrating would mean pointing multi-tenant traffic at a system with no
+  tenant column to isolate it.
+- Its two real advantages (dependency-graph parallel steps, cron scheduling)
+  solve a problem `create_content_pillar_workflow` — the one real, verified
+  workflow — doesn't have: it's a strict 5-step linear pipeline, not a DAG.
+
+Net: migrating would mean rebuilding this repo's two load-bearing
+capabilities (HTTP-calling, `$steps.x.y` templating) from scratch inside a
+system that has neither today and has weaker tenant isolation than what
+would be left behind. If real parallel steps, retries, or cron scheduling
+are ever needed, add them narrowly to `WorkflowExecutor`/`AutonomousScheduler`
+(baselayer's backoff-calculation pattern is worth borrowing) rather than
+adopting an engine whose HTTP-calling primitive doesn't exist yet.
+
 ## Rule going forward
 
 Never add a new engine URL, action name, or assumed contract to this repo
