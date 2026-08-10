@@ -1,18 +1,19 @@
-# Phase D Completion (Parts 1, 2 & 3): Decision Execution + Autonomous Scheduling + Persistence
+# Phase D Completion (Parts 1-4): Decision Execution + Autonomous Scheduling + Persistence + Goal-Based Sequencing
 
-**Status**: COMPLETE (this slice — see Scope note below)
+**Status**: COMPLETE — every item from the original Phase D roadmap is now addressed
 **Date**: 2026-08-09
-**Deliverables**: DecisionExecutor service, recommend+apply endpoint, per-workflow decision audit trail, background AutonomousScheduler with status/pause/resume control, opt-in snapshot persistence surviving real process restarts
+**Deliverables**: DecisionExecutor service, recommend+apply endpoint, per-workflow decision audit trail, background AutonomousScheduler with status/pause/resume control, opt-in snapshot persistence surviving real process restarts, tenant-settable goals that bias workflow sequencing
 
 ## Scope Note
 
-Phase D was left explicitly "TBD" in PHASE_A_COMPLETION.md's original roadmap ("Strategic decision making / Goal-based workflow selection / Autonomous scaling and optimization / TBD pending Stage 3-4 results"). Rather than guess at that whole surface, this pass covers three concrete, previously-flagged gaps in sequence:
+Phase D was left explicitly "TBD" in PHASE_A_COMPLETION.md's original roadmap ("Strategic decision making / Goal-based workflow selection / Autonomous scaling and optimization / TBD pending Stage 3-4 results"). Rather than guess at that whole surface at once, this pass covers four concrete, previously-flagged gaps in sequence:
 
 1. **Decisions were generated and recorded but nothing ever acted on them** ("Decision execution not implemented" — PHASE_B_COMPLETION.md tech debt) → Part 1, `DecisionExecutor`.
 2. **Applying a decision required a human (or external script) to call the new endpoint by hand** → Part 2, `AutonomousScheduler`.
 3. **Everything was in-memory only — a restart forgot every tenant, metric, decision, and workflow** (flagged in every prior phase's tech debt) → Part 3, snapshot persistence.
+4. **`recommend_workflow_sequence()`'s prioritization was unused by anything and had no tenant-level concept of "toward what"** → Part 4, tenant goals.
 
-Goal-based workflow selection (using `recommend_workflow_sequence()`'s prioritization in the scheduler, rather than ticking every workflow equally) remains open for a later pass.
+Part 4 deliberately does **not** attempt "a tenant states an objective in free text and the orchestrator invents new workflows toward it" — that's a much larger, more speculative system. What it does build: a tenant picks from a small, fixed set of goals, and that goal measurably changes which of the tenant's *existing* workflows get prioritized by `recommend_workflow_sequence()`. See Key Technical Decisions for why this scope, not a broader one.
 
 ## What Was Built
 
@@ -65,6 +66,15 @@ Goal-based workflow selection (using `recommend_workflow_sequence()`'s prioritiz
 - Added `TenantRegistry.restore()` and `OptimizationEngine.restore()` — small, explicit methods for inserting an already-fully-formed `Tenant`/`OptimizationDecision` from a snapshot, kept separate from `register()`/`analyze_and_optimize()` so loading never re-generates an api_key or re-runs analysis.
 - Explicitly a **snapshot, not a transaction log or a real database** — see Technical Debt below.
 
+### 8. Tenant goals (new) ✓
+
+- `Tenant.goal: str = "balanced"` — a new field on the tenant model, defaulting to today's exact behavior so existing tenants are unaffected
+- `GOAL_ACTION_BONUS` (in `optimization_engine.py`) — four fixed profiles (`balanced`, `maximize_growth`, `minimize_risk`, `maximize_engagement`), each a full re-weighting of the action-priority bonuses `recommend_workflow_sequence()` already used internally. `balanced` reproduces the original hardcoded weights exactly.
+- `recommend_workflow_sequence(..., goal="balanced")` — new parameter, looked up against `GOAL_ACTION_BONUS` with a fallback to `balanced` for any unrecognized value (defensive, not a validation gate — validation happens at the HTTP boundary, same pattern as `ACTION_ENGINE_MAP.get()` in Part 1)
+- `PUT /tenants/me/goal` — a tenant sets its own goal with its own API key; `POST /tenants` accepts an optional initial `goal` (admin-provisioned)
+- `GET /optimization/recommendations` now echoes the `goal` that produced its sequence, and actually uses the calling tenant's stored goal instead of always ranking with the old hardcoded weights
+- `app/services/persistence.py` updated to round-trip `goal` (with a `"balanced"` fallback when reading an older snapshot saved before this field existed)
+
 ## Test Results
 
 **test_phase_d.py** — 4 test groups, all passing:
@@ -90,7 +100,14 @@ Goal-based workflow selection (using `recommend_workflow_sequence()`'s prioritiz
 2. **Full HTTP restart**: process A spins up the real app via `TestClient` with `OS42_PERSISTENCE_PATH` set, provisions a tenant, creates a workflow, records a metric, then exits (triggering the lifespan's shutdown save) — process B spins up a *fresh* `TestClient(app)` pointed at the same snapshot file and successfully calls `GET /workflows` with the tenant's original API key, seeing the exact workflow process A created
 3. **Disabled by default**: with no env var set (true for every other test in the repo), `persistence.PERSISTENCE_PATH is None`, and both `save_snapshot()`/`load_snapshot()` return `None`/`False` without touching disk
 
-**Regression check** — full existing suite still green with zero changes needed: `test_phase_d_scheduler.py`, `test_phase_d.py`, `test_phase_b.py`, `test_phase_c.py`, `test_phase_c_api.py`, `test_dashboard.py`, `test_e2e_standalone.py`, `pytest tests/` (3 passed).
+**test_phase_d_goals.py** — 4 test groups, all passing:
+
+1. **Goal flips priority order**: two decisions constructed with *identical* base scores (confidence=0.5, impact=0 for both a `SCALE_BUDGET` and a `PAUSE` decision) so only the goal's bonus weighting can separate them — under `goal="balanced"` the order is `[wf-scale, wf-pause]`; under `goal="minimize_risk"` it's `[wf-pause, wf-scale]`. This is the test that actually proves the feature works, not just that a field round-trips.
+2. **Unknown goal falls back to balanced**: `goal="not-a-real-goal"` produces the exact same ordering as `goal="balanced"`, doesn't raise
+3. **HTTP goal endpoints**: new tenants default to `goal: "balanced"`; `PUT /tenants/me/goal` updates and persists across requests; an invalid goal value → 400; `POST /tenants` accepts an explicit initial goal
+4. **`/optimization/recommendations` reorders live**: same tenant, same two workflows, `goal="balanced"` → `[wf-scale, wf-pause]`, then `PUT /tenants/me/goal` to `minimize_risk` → next call to the same endpoint returns `[wf-pause, wf-scale]` and echoes `"goal": "minimize_risk"` in the response
+
+**Regression check** — full existing suite still green with zero changes needed: `test_phase_d_persistence.py`, `test_phase_d_scheduler.py`, `test_phase_d.py`, `test_phase_b.py`, `test_phase_c.py`, `test_phase_c_api.py`, `test_dashboard.py`, `test_e2e_standalone.py`, `pytest tests/` (3 passed).
 
 ## Code Structure
 
@@ -99,22 +116,32 @@ os42-orchestrator/
 ├── app/
 │   ├── config.py (22 lines)
 │   │   - ENGINE_URLS (moved out of main.py)
+│   ├── models/
+│   │   └── tenant.py (modified)
+│   │       - Tenant.goal: str = "balanced"
 │   ├── services/
 │   │   ├── decision_executor.py (145 lines)
 │   │   │   - ACTION_ENGINE_MAP, ExecutionResult, DecisionExecutor
 │   │   ├── autopilot.py (40 lines)
 │   │   │   - optimize_and_apply() - shared by the HTTP route and the scheduler
-│   │   ├── scheduler.py (modified)
-│   │   │   - TickSummary, AutonomousScheduler, now with an on_tick hook
-│   │   ├── persistence.py (new, 165 lines)
+│   │   ├── scheduler.py (with an on_tick hook)
+│   │   │   - TickSummary, AutonomousScheduler
+│   │   ├── persistence.py (modified)
 │   │   │   - build_snapshot/save_snapshot/load_snapshot, opt-in via OS42_PERSISTENCE_PATH
+│   │   │   - now round-trips Tenant.goal
 │   │   ├── tenancy.py (modified)
-│   │   │   - TenantRegistry.restore() for loading a snapshot's tenants
+│   │   │   - TenantRegistry.restore(), register(..., goal=...)
 │   │   └── optimization_engine.py (modified)
 │   │       - OptimizationEngine.restore() for loading a snapshot's decisions
+│   │       - GOAL_ACTION_BONUS, VALID_GOALS
+│   │       - recommend_workflow_sequence(..., goal="balanced")
 │   ├── routes/
-│   │   └── optimization.py (modified)
-│   │       - POST /optimize/{workflow_id}/apply, now calling autopilot.optimize_and_apply()
+│   │   ├── optimization.py (modified)
+│   │   │   - POST /optimize/{workflow_id}/apply, calling autopilot.optimize_and_apply()
+│   │   │   - GET /recommendations now goal-aware, echoes "goal" in the response
+│   │   └── tenants.py (modified)
+│   │       - POST /tenants accepts an initial goal
+│   │       - PUT /tenants/me/goal (self-service)
 │   └── main.py (modified)
 │       - imports ENGINE_URLS from app.config instead of defining it
 │       - create_workflow() initializes applied_decisions: []
@@ -122,14 +149,17 @@ os42-orchestrator/
 │       - GET /scheduler/status, POST /scheduler/pause, POST /scheduler/resume
 ├── test_phase_d.py (230 lines) - decision execution
 ├── test_phase_d_scheduler.py (195 lines) - autonomous scheduling
-└── test_phase_d_persistence.py (new, 240 lines) - snapshot persistence across real restarts
+├── test_phase_d_persistence.py (240 lines) - snapshot persistence across real restarts
+└── test_phase_d_goals.py (new, 175 lines) - goal-based sequencing
 
 Git History (this phase):
 - 0fbd98c: Phase D (part 1): Decision execution
 - d94f87d: docs: Phase D (part 1) completion report
 - 2e42a72: Phase D (part 2): Autonomous scheduling
 - d23a2a6: docs: Phase D (part 2) completion report
-- (pending commit): Phase D (part 3): Persistence
+- 286a96c: Phase D (part 3): Persistence
+- b423a7d: docs: Phase D (part 3) completion report
+- (pending commit): Phase D (part 4): Goal-based sequencing
 ```
 
 ## Key Technical Decisions
@@ -147,6 +177,9 @@ Git History (this phase):
 11. **A JSON snapshot, not a database.** The scale here (single dev instance, in-memory data structures already fit comfortably in memory) doesn't justify SQLite/Postgres and a migration story yet. A snapshot is trivially inspectable (`cat` the file), and `restore()` methods keep the load path from needing to reach into each service's private internals.
 12. **Piggybacking the scheduler's `on_tick` for periodic saves, instead of a second timer.** The scheduler already runs on exactly the cadence a periodic save should use; adding a second independent timer would be duplicate machinery for no benefit. The hook is generic (`Callable[[TickSummary], None]`) so the scheduler itself stays persistence-agnostic.
 13. **`restore()` methods, not reusing `register()`/`analyze_and_optimize()`.** Loading a snapshot needs to insert an *already-decided* fact (this exact tenant, with this exact api_key and created_at; this exact past decision) without re-running any of the logic that produces new ones — reusing the normal write paths would regenerate api_keys and misdate `created_at`.
+14. **A fixed set of four goals, not free-text objectives.** "State an objective in your own words and the orchestrator figures out what that means" is a fundamentally different (and much larger, more speculative) system — it needs something to interpret the free text into actual weights, with all the ambiguity and failure modes that implies. Four named profiles are unambiguous, testable, and cover the realistic range of "grow aggressively" vs "protect against downside" vs "optimize for reach" that the existing action vocabulary (`SCALE_BUDGET`, `PAUSE`, `CHANGE_FORMAT`, ...) can actually express.
+15. **Goal changes *sequencing priority*, not *which single decision gets made* for a given workflow.** `_make_decision()`'s rule waterfall is still driven purely by that workflow's own metrics — a workflow with a 6% conversion rate still gets `SCALE_BUDGET` regardless of goal. What the goal changes is how that decision gets weighted against other decisions when ranking a tenant's *whole* workflow set for `recommend_workflow_sequence()`. This was a deliberate choice over having goals silently override what the metrics say happened, which would make decisions harder to trust.
+16. **The scheduler's tick loop still doesn't use goal-weighted ordering.** It processes every workflow unconditionally every tick regardless of order (see Part 2's decision #7), so sequencing order has no effect on tick *outcomes* today - only on what `/optimization/recommendations` reports. Wiring goal-aware ordering into the tick loop only becomes meaningful once there's a reason to skip or cap what a single tick processes (e.g. a per-tick engine-call budget), which doesn't exist yet - see Technical Debt.
 
 ## Verification Checklist
 
@@ -161,20 +194,27 @@ Git History (this phase):
 - [x] Scheduler can be paused/resumed/stopped cleanly, admin-gated where it matters
 - [x] State (tenants, metrics, decisions, workflows) survives a genuine process restart, proven at both the service layer and over real HTTP
 - [x] Persistence is a true no-op when not configured (proven directly, and by every other test file needing zero changes)
+- [x] A tenant's goal measurably changes `recommend_workflow_sequence()`'s output (proven by an order flip, not just a field round-trip)
+- [x] Unknown/invalid goals degrade gracefully at the service layer (fallback) and are rejected cleanly at the HTTP boundary (400)
+- [x] Goals are tenant-scoped and self-service (`PUT /tenants/me/goal`), and survive a restart via persistence
 - [x] All prior-phase tests still pass
 
 ## Technical Debt / Notes
 
 - `ACTION_ENGINE_MAP` endpoint names are invented, pending real engine contracts.
 - No retry/backoff on failed engine calls; a failed apply simply reports failure and the next scheduler tick will just try again.
-- The scheduler ticks every active workflow of every tenant on the same fixed interval — no per-workflow cadence, no backoff for workflows that keep failing to reach an engine, no prioritization by `recommend_workflow_sequence()`'s scoring (it re-evaluates everything, unconditionally, every tick). Good enough for a single orchestrator instance at prototype scale; would need real scheduling logic before this runs against dozens of tenants with many workflows each.
+- The scheduler ticks every active workflow of every tenant on the same fixed interval, unconditionally — goal-weighted ordering exists now (see decision #16) but nothing in the tick loop uses it yet, since there's no cap/budget for it to matter against. Good enough for a single orchestrator instance at prototype scale; would need real scheduling logic before this runs against dozens of tenants with many workflows each.
 - Single in-process scheduler only — running more than one orchestrator instance would tick the same workflows redundantly from each instance (no distributed lock). Fine until there's a reason to run more than one instance.
 - **Persistence is a snapshot, not a transaction log.** A hard crash between saves (worst case: one `OS42_SCHEDULER_INTERVAL_SECONDS` interval) loses whatever changed since the last save. No concurrent-writer safety beyond the atomic rename (fine for one orchestrator process; would race with a second one writing the same path).
 - The whole snapshot is rewritten on every save (no incremental/delta writes) — at real scale (many tenants, long metric history) this would eventually need to become an actual database rather than "serialize everything to JSON every 5 minutes."
 - Metrics and decisions accumulate forever with no retention/pruning, in memory and in the snapshot alike — long-running processes would need a cutoff policy eventually.
+- The four goal profiles' specific numeric weights are a reasonable first pass, not tuned against real outcome data (there isn't any yet - no real engine has ever actually executed a `SCALE_BUDGET` call). Expect to revisit the actual numbers once real engines exist and outcomes can be measured.
+- No way to see *why* a given goal produced a given order beyond re-deriving it by hand - `/optimization/recommendations` returns the sequence and the goal, but not a per-workflow score breakdown.
 
 ## Next Steps
 
-Remaining open item from the original Phase D roadmap:
+Every item from the original Phase D roadmap ("Strategic decision making / Goal-based workflow selection / Autonomous scaling and optimization") now has a concrete implementation. What's left is depth, not scope:
 
-1. **Goal-based workflow selection** — a tenant states an objective, orchestrator picks/sequences workflows toward it. The most immediately actionable slice: make the scheduler call `recommend_workflow_sequence()` and prioritize/skip accordingly instead of ticking every workflow equally every pass.
+1. **Cap/budget the scheduler's per-tick work** and use goal-weighted `recommend_workflow_sequence()` ordering to decide what gets processed first when there's more work than budget — this is what would make Part 4's sequencing actually change tick *outcomes*, not just `/optimization/recommendations` output.
+2. **Real engine integration** — every phase since A has deferred this; `ACTION_ENGINE_MAP`, the workflow DSL's step definitions, and the goal weights are all still calibrated against invented contracts rather than measured outcomes.
+3. **An actual database** once snapshot-JSON-every-tick stops being adequate (many tenants, long history, need for queries persistence doesn't support today).
