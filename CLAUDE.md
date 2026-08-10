@@ -36,12 +36,21 @@ authoritative, actively-maintained status docs, not this repo:**
   `change_channel`, `adjust_timing`, `create_offer`, `create_nurture`,
   `update_strategy` — have **no real implementation anywhere in the fleet**.
   Not a path bug: nothing to call yet, full stop.
-- This repo's own tenant/API-key auth (`app/services/tenancy.py`) is a
-  from-scratch reimplementation of a problem `unkey-auth` (a real package,
-  already wired into content-engine, marketing-automation-engine, and
-  revenue-operations-engine) already solves. Not yet reconciled — deliberately
-  deferred behind the port/action fixes above; see the git log around
-  2026-08-10 for what shipped and what's still open.
+- **Correction, same day**: this file originally claimed this repo's tenant/
+  API-key auth (`app/services/tenancy.py`) "duplicates" `unkey-auth` and
+  should be replaced by it. On closer inspection that's wrong — don't do it.
+  `unkey-auth` answers one question, is this key valid (fail-open if
+  unconfigured); `TenantRegistry` answers a different one, which tenant's
+  data does this request see, and enforces isolation across this repo's own
+  metrics/decisions/workflows/goals. None of the 3 engines piloted on
+  `unkey-auth` (content, marketing, revenue) have any per-tenant data
+  isolation of their own — Stage 4 hasn't started fleet-wide. Replacing
+  `TenantRegistry` would delete real, working functionality nothing else in
+  the fleet provides, to adopt a mechanism that solves a narrower problem.
+  Outbound auth (this orchestrator calling the engines) already got real
+  `UNKEY_API_KEY`/`engine_auth_headers()` support in the Phase H fix - that
+  part was correct and stays. It's specifically *inbound* auth (clients
+  calling this orchestrator) that should NOT be swapped to unkey-auth.
 
 ## Rule going forward
 
