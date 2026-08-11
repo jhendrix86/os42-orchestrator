@@ -34,6 +34,13 @@ class WorkflowExecutor:
         """Close async HTTP client, unless it was injected (caller owns it)"""
         if self.client and self._owns_client:
             await self.client.aclose()
+            # Without this, a later connect() sees self.client is not None
+            # and skips creating a fresh one, reusing an already-closed
+            # client - real bug, hit by running the app lifespan (startup/
+            # shutdown) more than once in the same process, e.g. two
+            # `with TestClient(app)` blocks against the same module-level
+            # `workflow_executor` singleton in app/main.py.
+            self.client = None
 
     async def execute_workflow(
         self,

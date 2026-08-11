@@ -152,6 +152,160 @@ def create_content_pillar_workflow(
     return workflow
 
 
+# ===== Lead Nurture Email Workflow =====
+def create_lead_nurture_email_workflow(
+    lead_email: str,
+    subject: str,
+    from_email: str,
+    lead_name: Optional[str] = None,
+    campaign_name: Optional[str] = None,
+    html_content: Optional[str] = None,
+) -> Workflow:
+    """
+    Capture a lead, create a campaign to hold it under, create an email
+    campaign, and send it.
+
+    Every step below is verified against real marketing-automation-engine
+    router code (2026-08-11 reconciliation, extending the Phase H pattern
+    to a second engine - see CLAUDE.md at the repo root). This is the first
+    workflow template in this repo whose steps live on marketing-automation-
+    engine rather than content-engine.
+
+    Real differences worth knowing:
+    - POST /leads/create, POST /campaigns/create, and POST /email/create
+      each persist a real database row (not mocks) - see leads.py,
+      campaigns.py, email.py. campaign_type must be a real CampaignType
+      enum value ("email" is one - app/models/campaign.py).
+    - POST /email/{id}/send genuinely calls SendGrid per recipient
+      (app/services/esp/sendgrid_client.py) and honestly reports failure
+      when SENDGRID_API_KEY isn't configured - it doesn't fake success,
+      same honesty contract as content-engine's distribution/execute step.
+    - Leaving recipient_emails empty (this workflow's default) sends to
+      every lead on file, which - since this workflow just created one -
+      always includes the lead captured in step 1.
+    - campaigns/{id}/launch exists but is a server-side stub ("In
+      production, this would update status...") - deliberately not used
+      here; launching isn't required to send an email campaign under a
+      draft campaign, and calling a known stub step wouldn't be a real
+      verification.
+    """
+    workflow = Workflow(
+        workflow_id=f"nurture-{int(datetime.utcnow().timestamp())}",
+        name="Lead Nurture Email",
+        description="Capture a lead and send it a real email campaign",
+    )
+
+    # Step 1: Capture the lead — POST /leads/create
+    workflow.add_step(
+        engine="marketing",
+        action="leads/create",
+        params={
+            "email": lead_email,
+            "name": lead_name,
+            "source": "orchestrator_workflow",
+        },
+        step_id="create_lead",
+    )
+
+    # Step 2: Create the parent campaign — POST /campaigns/create
+    workflow.add_step(
+        engine="marketing",
+        action="campaigns/create",
+        params={
+            "name": campaign_name or f"Nurture - {lead_email}",
+            "campaign_type": "email",
+        },
+        step_id="create_campaign",
+    )
+
+    # Step 3: Create the email campaign under it — POST /email/create
+    workflow.add_step(
+        engine="marketing",
+        action="email/create",
+        params={
+            "campaign_id": "$steps.create_campaign.id",
+            "subject": subject,
+            "from_email": from_email,
+            "html_content": html_content or "",
+        },
+        step_id="create_email_campaign",
+    )
+
+    # Step 4: Send it — POST /email/{id}/send
+    workflow.add_step(
+        engine="marketing",
+        action="email/$steps.create_email_campaign.id/send",
+        params={},
+        step_id="send_email_campaign",
+    )
+
+    return workflow
+
+
+# ===== Customer Subscription Workflow =====
+def create_customer_subscription_workflow(
+    customer_email: str,
+    plan_id: str,
+    payment_method_id: str,
+    customer_name: Optional[str] = None,
+    billing_cycle: str = "monthly",
+) -> Workflow:
+    """
+    Create a customer, then subscribe them to a plan.
+
+    Every step below is verified against real revenue-operations-engine
+    router code (2026-08-11 reconciliation, extending the Phase H pattern
+    to a third engine - see CLAUDE.md at the repo root).
+
+    Real differences worth knowing:
+    - POST /customers/ (note the trailing slash - the real route is
+      registered as "/" under the "/customers" prefix; calling
+      "customers" without it would hit FastAPI's 307 redirect-slash
+      behavior instead of the real handler) persists a real Customer row.
+    - POST /subscriptions/create does NOT write to this engine's own
+      database - it's a thin, honest proxy to baselayer's income_engine
+      (app/services/baselayer_client.py). Against the real engine, this
+      step will report a clear "not configured" failure until a real
+      baselayer service account exists (BASELAYER_SERVICE_EMAIL/PASSWORD -
+      see ../HANDOFF.md's "Credentials / accounts status"), not a
+      fabricated success - same honesty contract as every other real
+      client in this fleet.
+    - plan_id is passed straight through as baselayer's revenue stream id;
+      the caller is responsible for it referring to a real stream.
+    """
+    workflow = Workflow(
+        workflow_id=f"subscribe-{int(datetime.utcnow().timestamp())}",
+        name="Customer Subscription Onboarding",
+        description="Create a customer and subscribe them to a plan",
+    )
+
+    # Step 1: Create the customer — POST /customers/
+    workflow.add_step(
+        engine="revenue",
+        action="customers/",
+        params={
+            "email": customer_email,
+            "name": customer_name,
+        },
+        step_id="create_customer",
+    )
+
+    # Step 2: Subscribe them — POST /subscriptions/create
+    workflow.add_step(
+        engine="revenue",
+        action="subscriptions/create",
+        params={
+            "customer_id": "$steps.create_customer.id",
+            "plan_id": plan_id,
+            "payment_method_id": payment_method_id,
+            "billing_cycle": billing_cycle,
+        },
+        step_id="create_subscription",
+    )
+
+    return workflow
+
+
 # ===== Daily Optimization Workflow =====
 def create_daily_optimization_workflow() -> Workflow:
     """
