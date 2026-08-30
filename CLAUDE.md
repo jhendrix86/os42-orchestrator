@@ -90,6 +90,43 @@ are ever needed, add them narrowly to `WorkflowExecutor`/`AutonomousScheduler`
 (baselayer's backoff-calculation pattern is worth borrowing) rather than
 adopting an engine whose HTTP-calling primitive doesn't exist yet.
 
+## Phase J reconciliation (2026-08-30, HP-14) — the 5 Stage-4-real engines
+
+Extended Phase H/I's real-verified-workflow-template pattern to the five
+engines the 2026-08-12/15 "6 remaining mock engines made real" work + the
+2026-08-29 stale-image rebuild made genuinely trustworthy: **notification,
+integration, sales, customer-support, analytics**. Four new templates in
+`app/models/workflows.py`, each step verified against the *current* router
+code in the sibling repo (not guessed), test in
+`test_phase_j_reconciliation.py` (same mock-engine harness as Phase F/H/I —
+proves the orchestrator's HTTP mechanics + `$steps.x.y` path templating;
+real end-to-end against the live fleet is the Acer session's follow-up on
+Nexus):
+
+| template | engines | real routes verified against |
+|----------|---------|------------------------------|
+| `create_support_escalation_workflow` | support + notification | `POST /tickets/create` → `POST /tickets/{id}/escalate` (`customer-support-engine/app/routers/tickets.py`; escalate only flips `status=ESCALATED`, notifies nobody — the 3rd step exists for that reason), `POST /notifications/send` (`notification-engine/app/routers/notifications.py`; `channels` is `List[NotificationChannel]`, real delivery attempted on channel[0]) |
+| `create_integration_sync_workflow` | integration | `POST /integrations/create` (`config` is required; `integration_type` ∈ crm/marketing/analytics/productivity/custom) → `POST /integrations/{id}/sync` (`integration-engine/app/services/sync_engine.py` makes a real GET to `config["sync_url"]`; honest FAIL if none — template always supplies one) |
+| `create_analytics_report_workflow` | analytics | `POST /reports/` **(trailing slash — real route is `@router.post("/")` under prefix `/reports`; no-slash gets a 307)** → `POST /reports/{id}/generate` (`analytics-engine/app/routers/reports.py`; computes a real aggregate over `Metric` rows, stores numbers in `extra_metadata`, no fake `output_url`) |
+| `create_lead_conversion_workflow` | sales | `POST /leads/create` → `POST /leads/{id}/convert` (`sales-engine/app/routers/leads.py`; convert creates a real `Deal` row + transitions the lead, `deal_name`/`stage_id` both optional with sensible defaults) |
+
+**`DecisionExecutor.ACTION_ENGINE_MAP`'s 5 unbacked actions — re-checked, still nothing to point at.**
+Grepped current `marketing-automation-engine` and `content-engine` routers:
+no `scale_budget` / `adjust_frequency` / `change_channel` / `adjust_timing` /
+`change_format` endpoint exists. The real marketing routes are all
+"do-the-thing" actions (`campaigns/{id}/launch`, `social/{id}/publish`,
+`email/{id}/send`) — none is "adjust a parameter of a running thing".
+`campaigns/create` accepts a `budget` field, but there's no
+scale-an-existing-campaign endpoint, so `SCALE_BUDGET` still has nothing.
+**One near-miss, deliberately NOT force-mapped:** `content-engine`'s
+`POST /content/{id}/repurpose` is real, but it's a content-transformation
+endpoint (one pillar → N derivative formats) needing a `{content_id}` path
+param + its own body — it does not fit `DecisionExecutor`'s flat
+`POST {engine}/{action}` + decision-payload calling contract. Mapping
+`CHANGE_FORMAT` → it would be inventing a contract, exactly what the
+2026-08-10 drift was. `ACTION_ENGINE_MAP` left as-is (flagged, honest
+`status: "failed"` until real engine-side work adds these).
+
 ## Rule going forward
 
 Never add a new engine URL, action name, or assumed contract to this repo

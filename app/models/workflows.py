@@ -306,6 +306,257 @@ def create_customer_subscription_workflow(
     return workflow
 
 
+# ===== Support Escalation Workflow =====
+def create_support_escalation_workflow(
+    customer_name: str,
+    customer_email: str,
+    subject: str,
+    message: str,
+    notify_recipient: str,
+    priority: str = "high",
+    notify_channel: str = "email",
+) -> Workflow:
+    """
+    File a support ticket, escalate it, and notify the on-call recipient.
+
+    Every step below is verified against real customer-support-engine and
+    notification-engine router code (Step 9, 2026-08-30 reconciliation -
+    extending the Phase H/I pattern to the two engines Stage 4's rollout
+    made genuinely real: see ../HANDOFF.md's 2026-08-12/15 "6 remaining
+    mock engines made real" entry and Nexus's 2026-08-29 stale-image audit,
+    which is what makes this the first session that could actually trust
+    these two engines' source as reflecting what's deployed).
+
+    Real differences worth knowing:
+    - POST /tickets/create persists a real Ticket row (and a real Customer
+      row, get-or-created by email) - see tickets.py's own docstring,
+      "real DB-backed CRUD against the tickets table."
+    - POST /tickets/{id}/escalate only flips ticket.status to ESCALATED;
+      it does not itself notify anyone - that's genuinely a separate real
+      step, not a formality, which is why this workflow's third step exists.
+    - POST /notifications/send genuinely attempts delivery on the first
+      requested channel via app/services/delivery/dispatch.py and reports
+      an honest per-channel success/failure - it does not fake delivery.
+    - priority must be a real TicketPriority enum value (customer-support-
+      engine's app/models/ticket.py: critical/high/medium/low) -
+      "critical" tickets get the tightest real SLA deadline.
+    """
+    workflow = Workflow(
+        workflow_id=f"escalation-{int(datetime.utcnow().timestamp())}",
+        name="Support Escalation Notification",
+        description="File a support ticket, escalate it, and notify on-call",
+    )
+
+    # Step 1: File the ticket — POST /tickets/create
+    workflow.add_step(
+        engine="support",
+        action="tickets/create",
+        params={
+            "customer_name": customer_name,
+            "customer_email": customer_email,
+            "subject": subject,
+            "message": message,
+            "priority": priority,
+        },
+        step_id="create_ticket",
+    )
+
+    # Step 2: Escalate it — POST /tickets/{id}/escalate
+    workflow.add_step(
+        engine="support",
+        action="tickets/$steps.create_ticket.id/escalate",
+        params={},
+        step_id="escalate_ticket",
+    )
+
+    # Step 3: Notify on-call — POST /notifications/send
+    workflow.add_step(
+        engine="notification",
+        action="notifications/send",
+        params={
+            "recipient": notify_recipient,
+            "recipient_type": "email",
+            "channels": [notify_channel],
+            "subject": f"Escalated: {subject}",
+            "message": f"Ticket $steps.create_ticket.id escalated for {customer_email}: {message}",
+        },
+        step_id="notify_oncall",
+    )
+
+    return workflow
+
+
+# ===== Integration Sync Workflow =====
+def create_integration_sync_workflow(
+    name: str,
+    provider: str,
+    sync_url: str,
+    integration_type: str = "custom",
+) -> Workflow:
+    """
+    Register an integration, then trigger a real sync run against it.
+
+    Verified against real integration-engine router code (Step 9,
+    2026-08-30 reconciliation).
+
+    Real differences worth knowing:
+    - POST /integrations/create persists a real Integration row (and a
+      real, encrypted Credential row if credentials are supplied) - see
+      integrations.py's own docstring, "real DB-backed CRUD against the
+      integrations table."
+    - POST /integrations/{id}/sync creates a real SyncJob row and runs it
+      via app/services/sync_engine.py, which makes a genuine outbound HTTP
+      call to the integration's own config["sync_url"] - there's no
+      per-vendor SDK for any provider this schema anticipates, so "real"
+      here means a real HTTP call to whatever endpoint was configured, not
+      a simulated one. It honestly fails ("no 'sync_url' configured") if
+      config carries none, rather than fabricating a progress number -
+      this workflow always supplies one for exactly that reason.
+    - integration_type must be a real IntegrationType enum value
+      (integration-engine's app/models/integration.py) - "custom" always
+      exists; "crm"/"marketing"/"analytics"/"productivity" are also real.
+    """
+    workflow = Workflow(
+        workflow_id=f"intsync-{int(datetime.utcnow().timestamp())}",
+        name="Integration Sync",
+        description="Register an integration and run a real sync against it",
+    )
+
+    # Step 1: Register the integration — POST /integrations/create
+    workflow.add_step(
+        engine="integration",
+        action="integrations/create",
+        params={
+            "name": name,
+            "integration_type": integration_type,
+            "provider": provider,
+            "config": {"sync_url": sync_url},
+        },
+        step_id="create_integration",
+    )
+
+    # Step 2: Trigger a real sync — POST /integrations/{id}/sync
+    workflow.add_step(
+        engine="integration",
+        action="integrations/$steps.create_integration.id/sync",
+        params={},
+        step_id="trigger_sync",
+    )
+
+    return workflow
+
+
+# ===== Analytics Report Workflow =====
+def create_analytics_report_workflow(
+    report_name: str,
+    metric_names: Optional[list] = None,
+    period_days: int = 30,
+) -> Workflow:
+    """
+    Create an analytics report, then generate it.
+
+    Verified against real analytics-engine router code (Step 9, 2026-08-30
+    reconciliation).
+
+    Real differences worth knowing:
+    - POST /reports/ (note the trailing slash - the real route is
+      registered as "/" under the "/reports" prefix, same
+      redirect-on-missing-slash gotcha as revenue-operations-engine's
+      /customers/ - calling "reports" without it would hit FastAPI's 307
+      redirect instead of the real handler) persists a real Report row
+      with status PENDING.
+    - POST /reports/{id}/generate computes a real aggregate over
+      actually-recorded Metric rows for the requested metric_names/
+      period_days - see reports.py's own docstring. It does not claim a
+      PDF/CSV exists at a fake output_url; no file-generation
+      infrastructure exists in this engine, so the honestly computable
+      output (real numbers) is stored in extra_metadata instead. Against
+      the real engine, an empty metric_names list or a period with no
+      recorded metrics yields a real report with zero/empty results, not
+      a failure - this step reports failure only on an actual error.
+    """
+    workflow = Workflow(
+        workflow_id=f"report-{int(datetime.utcnow().timestamp())}",
+        name="Analytics Report Generation",
+        description="Create an analytics report and generate it",
+    )
+
+    # Step 1: Create the report — POST /reports/
+    workflow.add_step(
+        engine="analytics",
+        action="reports/",
+        params={
+            "name": report_name,
+            "report_type": "metrics_summary",
+            "metric_names": metric_names or [],
+            "period_days": period_days,
+        },
+        step_id="create_report",
+    )
+
+    # Step 2: Generate it — POST /reports/{id}/generate
+    workflow.add_step(
+        engine="analytics",
+        action="reports/$steps.create_report.id/generate",
+        params={},
+        step_id="generate_report",
+    )
+
+    return workflow
+
+
+# ===== Lead Conversion Workflow =====
+def create_lead_conversion_workflow(
+    lead_name: str,
+    lead_email: str,
+    estimated_value: Optional[int] = None,
+    deal_name: Optional[str] = None,
+) -> Workflow:
+    """
+    Capture a sales lead, then convert it into a real pipeline deal.
+
+    Verified against real sales-engine router code (Step 9, 2026-08-30
+    reconciliation).
+
+    Real differences worth knowing:
+    - POST /leads/create persists a real Lead row - see leads.py's own
+      docstring, "real DB-backed CRUD against the leads table."
+    - POST /leads/{id}/convert creates a real Deal row in the pipeline
+      (app/models/pipeline.py) and updates the lead's own status/
+      pipeline_stage to reflect it - it's a genuine state transition, not
+      a label change. deal_name/stage_id are both optional; the endpoint
+      picks a sensible default (the lead's name, and the pipeline's first
+      real stage) when omitted.
+    """
+    workflow = Workflow(
+        workflow_id=f"convert-{int(datetime.utcnow().timestamp())}",
+        name="Lead Conversion",
+        description="Capture a lead and convert it into a pipeline deal",
+    )
+
+    # Step 1: Capture the lead — POST /leads/create
+    workflow.add_step(
+        engine="sales",
+        action="leads/create",
+        params={
+            "name": lead_name,
+            "email": lead_email,
+            "estimated_value": estimated_value,
+        },
+        step_id="create_lead",
+    )
+
+    # Step 2: Convert it — POST /leads/{id}/convert
+    workflow.add_step(
+        engine="sales",
+        action="leads/$steps.create_lead.id/convert",
+        params={"deal_name": deal_name} if deal_name else {},
+        step_id="convert_lead",
+    )
+
+    return workflow
+
+
 # ===== Daily Optimization Workflow =====
 def create_daily_optimization_workflow() -> Workflow:
     """
