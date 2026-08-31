@@ -86,10 +86,14 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Configure CORS
+# Configure CORS — origins from the ALLOWED_ORIGINS env var (comma-separated).
+# Default is empty (deny all cross-origin): the old allow_origins=["*"] with
+# allow_credentials=True makes Starlette reflect any request Origin and return
+# Access-Control-Allow-Credentials: true. See ../SECURITY_REVIEW.md finding #1.
+_allowed_origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
