@@ -1,0 +1,66 @@
+# Fly.io config — os42-orchestrator, free-allowance proof-of-life.
+# Docs: https://fly.io/docs/reference/configuration/
+#
+# PREPARED, NOT APPLIED. `fly launch` / `fly deploy` are run by a human per
+# RUNBOOK.md §4 — this file just makes that run deterministic.
+#
+# Why Fly as the alternative to Render: the free allowance lets you attach a
+# small persistent volume, so the JSON snapshot (OS42_PERSISTENCE_PATH)
+# actually survives restarts. Render's free plan cannot do that.
+#
+# Replace the app name after you pick one (`fly launch` will prompt).
+app = "os42-orchestrator"
+primary_region = "sea"           # pick one near your Postgres if you add one
+
+[build]
+  dockerfile = "deploy/cloud/Dockerfile"
+
+[env]
+  PORT = "8080"
+  ALLOWED_ORIGINS = ""                         # CORS default-deny
+  OS42_SCHEDULER_INTERVAL_SECONDS = "300"
+  OS42_PERSISTENCE_PATH = "/data/os42_snapshot.json"   # on the mounted volume below
+  # Engine URLs point nowhere on purpose (no engines in the cloud). Per-call
+  # connection failures are caught; /status and the scheduler degrade cleanly.
+  CONTENT_ENGINE_URL = "http://127.0.0.1:9"
+  MARKETING_ENGINE_URL = "http://127.0.0.1:9"
+  ANALYTICS_ENGINE_URL = "http://127.0.0.1:9"
+  MONITORING_ENGINE_URL = "http://127.0.0.1:9"
+  NOTIFICATION_ENGINE_URL = "http://127.0.0.1:9"
+  SALES_ENGINE_URL = "http://127.0.0.1:9"
+  REVENUE_ENGINE_URL = "http://127.0.0.1:9"
+  INTEGRATION_ENGINE_URL = "http://127.0.0.1:9"
+  SUPPORT_ENGINE_URL = "http://127.0.0.1:9"
+  GOVERNANCE_ENGINE_URL = "http://127.0.0.1:9"
+
+# Secrets (NOT in this file) — set once, per RUNBOOK.md §4.3:
+#   fly secrets set OS42_ADMIN_KEY=... OS42_DEFAULT_API_KEY=...
+# and later, if you wire Postgres:
+#   fly secrets set DATABASE_URL=postgres://...
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = true       # scale to zero when idle (stays in free allowance)
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [[http_service.checks]]
+    method = "GET"
+    path = "/health"
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "10s"
+
+# Single small machine — the app runs an in-process background scheduler and
+# keeps in-memory state; do not run >1 instance (see Dockerfile note).
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
+  cpus = 1
+
+# Persistent volume for the snapshot. Create it once (RUNBOOK.md §4.2):
+#   fly volumes create os42_data --size 1 --region sea
+[mounts]
+  source = "os42_data"
+  destination = "/data"

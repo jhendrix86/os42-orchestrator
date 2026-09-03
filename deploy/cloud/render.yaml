@@ -1,0 +1,85 @@
+# Render Blueprint — os42-orchestrator, free-tier proof-of-life.
+# Docs: https://render.com/docs/blueprint-spec
+#
+# PREPARED, NOT APPLIED. Nothing here provisions anything until a human
+# runs the steps in RUNBOOK.md with a real Render account.
+#
+# Free plan caveats baked into the choices below:
+#   - No persistent disk on the free plan. State is in-memory + an OPTIONAL
+#     JSON snapshot (OS42_PERSISTENCE_PATH). On free, that snapshot lives on
+#     an ephemeral filesystem and is LOST on every deploy, restart, and
+#     idle spin-down (~15 min no traffic). Fine for a demo; see RUNBOOK.md
+#     §5 for the Fly-volume and Postgres alternatives.
+#   - Service sleeps when idle; first request after sleep takes ~30-60s.
+
+services:
+  - type: web
+    name: os42-orchestrator
+    runtime: docker
+    dockerfilePath: ./deploy/cloud/Dockerfile
+    dockerContext: .
+    plan: free
+    region: oregon           # match your free-tier Postgres region if you add one
+    branch: main
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      # --- Secrets: NOT set here. Create them in the Render dashboard or
+      #     via `render env set` so they never land in git. sync:false keeps
+      #     Blueprint sync from clearing them. ---
+      - key: OS42_ADMIN_KEY
+        sync: false
+      - key: OS42_DEFAULT_API_KEY
+        sync: false
+
+      # --- Non-secret config with safe explicit values ---
+      - key: ALLOWED_ORIGINS
+        value: ""                     # CORS default-deny; set to your UI origin when one exists
+      - key: OS42_SCHEDULER_INTERVAL_SECONDS
+        value: "300"
+      - key: OS42_PERSISTENCE_PATH
+        value: "/tmp/os42_snapshot.json"   # ephemeral on free plan — see caveat above
+
+      # --- Downstream engine URLs. None of these engines are deployed to
+      #     the cloud; left pointing nowhere on purpose. The scheduler tick
+      #     and /status degrade gracefully when they are unreachable
+      #     (connection refused is caught per-call). Fill in real URLs if
+      #     you ever expose an engine. ---
+      - key: CONTENT_ENGINE_URL
+        value: "http://127.0.0.1:9"
+      - key: MARKETING_ENGINE_URL
+        value: "http://127.0.0.1:9"
+      - key: ANALYTICS_ENGINE_URL
+        value: "http://127.0.0.1:9"
+      - key: MONITORING_ENGINE_URL
+        value: "http://127.0.0.1:9"
+      - key: NOTIFICATION_ENGINE_URL
+        value: "http://127.0.0.1:9"
+      - key: SALES_ENGINE_URL
+        value: "http://127.0.0.1:9"
+      - key: REVENUE_ENGINE_URL
+        value: "http://127.0.0.1:9"
+      - key: INTEGRATION_ENGINE_URL
+        value: "http://127.0.0.1:9"
+      - key: SUPPORT_ENGINE_URL
+        value: "http://127.0.0.1:9"
+      - key: GOVERNANCE_ENGINE_URL
+        value: "http://127.0.0.1:9"
+
+      # UNKEY_API_KEY intentionally omitted — outbound engine auth is a
+      # no-op without it (app/config.py engine_auth_headers()), which is
+      # correct for a fleet with no real Unkey workspace yet.
+
+# --- Postgres: NOT declared here. ---
+# The orchestrator has no database layer today (no driver, no models — its
+# only persistence is the JSON snapshot above). A Render/Neon/Supabase
+# Postgres would sit unused until a Postgres-backed persistence store is
+# written. RUNBOOK.md §5.3 has the concrete plan for when that happens; at
+# that point add:
+#
+#   databases:
+#     - name: os42-orchestrator-db
+#       plan: free
+#       region: oregon
+#
+# and a DATABASE_URL envVar with fromDatabase.{name,property:connectionString}.
