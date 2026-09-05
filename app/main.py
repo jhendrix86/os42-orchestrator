@@ -78,12 +78,21 @@ async def lifespan(app: FastAPI):
     logger.info("os42_orchestrator_shutting_down")
 
 
+# SECURITY_REVIEW.md finding: /docs, /redoc, /openapi.json were reachable
+# unauthenticated on every engine (dynamic-pentest-confirmed) - disabled
+# unless DEBUG=true. No Settings object here (this repo's config.py is
+# just ENGINE_URLS), so this checks the env var directly.
+_debug = os.getenv("DEBUG", "false").lower() == "true"
+
 # Create FastAPI application
 app = FastAPI(
     title="OS42 Orchestrator",
     description="Central coordination layer for the Autonomous Business Operating System",
     version="1.0.0",
-    lifespan=lifespan
+    lifespan=lifespan,
+    docs_url="/docs" if _debug else None,
+    redoc_url="/redoc" if _debug else None,
+    openapi_url="/openapi.json" if _debug else None,
 )
 
 # Configure CORS — see ../SECURITY_REVIEW.md finding #1: no wildcard with
